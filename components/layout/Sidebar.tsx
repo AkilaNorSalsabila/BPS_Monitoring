@@ -137,8 +137,8 @@ const dashboardItem = {
  */
 const dataMasterItems = [
   {
-    label: 'Pegawai',
-    href: '#',
+    label: 'Mitra',
+    href: '/mitra',
     icon: 'users' as IconName,
   },
   {
