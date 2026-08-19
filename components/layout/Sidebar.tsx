@@ -87,25 +87,25 @@ function Icon({ name }: { name: IconName }) {
         </svg>
       );
     case 'table':
-  return (
-    <svg {...common}>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M3 9h18" />
-      <path d="M9 9v11" />
-      <path d="M15 9v11" />
-    </svg>
-  );
+      return (
+        <svg {...common}>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 9h18" />
+          <path d="M9 9v11" />
+          <path d="M15 9v11" />
+        </svg>
+      );
 
-case 'report':
-  return (
-    <svg {...common}>
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <path d="M14 2v6h6" />
-      <path d="M8 13h8" />
-      <path d="M8 17h5" />
-      <path d="M8 9h2" />
-    </svg>
-  );
+    case 'report':
+      return (
+        <svg {...common}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <path d="M14 2v6h6" />
+          <path d="M8 13h8" />
+          <path d="M8 17h5" />
+          <path d="M8 9h2" />
+        </svg>
+      );
 
     case 'settings':
       return (
@@ -122,9 +122,6 @@ case 'report':
 
 /**
  * Menu Dashboard.
- *
- * Dashboard berdiri sendiri dan tidak masuk ke dalam
- * kategori Data Master maupun Penugasan.
  */
 const dashboardItem = {
   label: 'Dashboard',
@@ -143,7 +140,7 @@ const dataMasterItems = [
   },
   {
     label: 'Kegiatan',
-    href: '#',
+    href: '/kegiatan',
     icon: 'activity' as IconName,
   },
 ];
@@ -152,6 +149,11 @@ const dataMasterItems = [
  * Menu Penugasan.
  */
 const assignmentItems = [
+   {
+    label: 'Pengaturan Limit',
+    href: '/pengaturan-limit', // Sesuaikan URL rutenya
+    icon: 'settings' as IconName,
+  },
   {
     label: 'Penugasan Pegawai',
     href: '#',
@@ -180,25 +182,17 @@ const reportItems = [
   },
 ];
 
-export default function Sidebar({
-  mobileOpen,
-  onClose,
-}: SidebarProps) {
+export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
 
   /**
    * Komponen untuk menampilkan satu item menu.
-   *
-   * Dibuat sebagai function agar style menu
-   * tidak perlu ditulis berulang-ulang.
    */
-  const renderMenuItem = (
-    item: {
-      label: string;
-      href: string;
-      icon: IconName;
-    },
-  ) => {
+  const renderMenuItem = (item: {
+    label: string;
+    href: string;
+    icon: IconName;
+  }) => {
     const active = pathname === item.href;
 
     return (
@@ -233,15 +227,10 @@ export default function Sidebar({
       {/* Sidebar utama */}
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r border-blue-400/60 bg-[#07508f] text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
-          mobileOpen
-            ? 'translate-x-0'
-            : '-translate-x-full'
+          mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-
-        {/* =========================
-            LOGO BPS
-        ========================== */}
+        {/* LOGO BPS */}
         <div className="flex h-[70px] items-center justify-center border-b border-white/15 px-4">
           <Link
             href="/dashboard"
@@ -256,45 +245,28 @@ export default function Sidebar({
           </Link>
         </div>
 
-        {/* =========================
-            NAVIGASI SIDEBAR
-        ========================== */}
+        {/* NAVIGASI SIDEBAR */}
         <nav className="flex-1 overflow-y-auto px-2.5 py-3 text-[14px]">
+          {/* DASHBOARD */}
+          <div className="mb-3">{renderMenuItem(dashboardItem)}</div>
 
-          {/* =========================
-              DASHBOARD
-          ========================== */}
-          <div className="mb-3">
-            {renderMenuItem(dashboardItem)}
-          </div>
-
-          {/* =========================
-              DATA MASTER
-          ========================== */}
+          {/* DATA MASTER */}
           <div className="mb-3">
             <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
               Data Master
             </div>
-
             <div className="space-y-0.5">
-              {dataMasterItems.map((item) =>
-                renderMenuItem(item)
-              )}
+              {dataMasterItems.map((item) => renderMenuItem(item))}
             </div>
           </div>
 
-          {/* =========================
-              PENUGASAN
-          ========================== */}
+          {/* PENUGASAN */}
           <div className="mb-3">
             <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
               Penugasan
             </div>
-
             <div className="space-y-0.5">
-              {assignmentItems.map((item) =>
-                renderMenuItem(item)
-              )}
+              {assignmentItems.map((item) => renderMenuItem(item))}
             </div>
           </div>
 

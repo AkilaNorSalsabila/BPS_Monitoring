@@ -93,7 +93,7 @@ export default function MitraPage() {
   const startItem = totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
   const endItem = Math.min(currentPage * itemsPerPage, totalItems);
 
-  // Handle Unggah File Excel Otomatisasi
+  // Handle Unggah File Excel Otomatisasi (Mitra -> Kegiatan -> Penugasan)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -103,13 +103,17 @@ export default function MitraPage() {
 
     reader.onload = async (evt) => {
       try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
+        const buffer = evt.target?.result;
+        if (!buffer) throw new Error('Gagal membaca file');
+
+        // Membaca array buffer dari FileReader
+        const wb = XLSX.read(buffer, { type: 'array' });
         const wsname = wb.SheetNames[0];
         const ws = wb.Sheets[wsname];
 
         const rawData: any[] = XLSX.utils.sheet_to_json(ws);
 
+        // 1. Mapping Kolom Excel Export BPS ke Field Supabase
         const formattedData: MitraData[] = rawData
           .map((row) => ({
             sobat_id: String(row['SOBAT ID'] || row['Sobat ID'] || row['sobat_id'] || '').trim(),
@@ -129,17 +133,74 @@ export default function MitraPage() {
           return;
         }
 
-        const uniqueMitraMap = new Map();
+        // Filter unik sobat_id untuk mencegah error konflik saat batch upsert
+        const uniqueMitraMap = new Map<string, MitraData>();
         formattedData.forEach((item) => uniqueMitraMap.set(item.sobat_id, item));
         const uniqueFormattedData = Array.from(uniqueMitraMap.values());
 
+        // 2. Upsert ke tabel 'mitra'
         const { error: errMitra } = await supabase
           .from('mitra')
           .upsert(uniqueFormattedData, { onConflict: 'sobat_id' });
 
         if (errMitra) throw errMitra;
 
-        alert(`Berhasil mengimpor ${uniqueFormattedData.length} data mitra.`);
+        // 3. Ekstrak Nama Kegiatan dari Judul File Excel
+        const namaKegiatan = file.name.split('-')[0].trim().toUpperCase();
+
+        // 4. Cari atau Buat Record Baru di Tabel 'kegiatan'
+        let kegiatanId: number | null = null;
+
+        const { data: existingKegiatan } = await supabase
+          .from('kegiatan')
+          .select('id')
+          .eq('nama_kegiatan', namaKegiatan)
+          .maybeSingle();
+
+        if (existingKegiatan) {
+          kegiatanId = existingKegiatan.id;
+        } else {
+          // Hitung total data kegiatan saat ini untuk menentukan nomor urut selanjutnya
+          const { count } = await supabase
+            .from('kegiatan')
+            .select('*', { count: 'exact', head: true });
+
+          const nextNumber = (count || 0) + 1;
+          const kodeBaru = `KED-${nextNumber}`; // Menghasilkan KED-1 jika data masih kosong/pertama
+
+          const { data: newKegiatan, error: errKeg } = await supabase
+            .from('kegiatan')
+            .insert({
+              nama_kegiatan: namaKegiatan,
+              kode_kegiatan: kodeBaru,
+              bulan_kegiatan: new Date().toLocaleDateString('id-ID', { month: 'long', year: 'numeric' }),
+              keterangan: 'Otomatis diimpor dari file Excel Mitra',
+              pagu_anggaran: 0,
+            })
+            .select('id')
+            .single();
+
+          if (errKeg) throw errKeg;
+          kegiatanId = newKegiatan.id;
+        }
+
+        // 5. Hubungkan Mitra ke Kegiatan di Tabel 'penugasan'
+        if (kegiatanId) {
+          const penugasanList = uniqueFormattedData.map((m) => ({
+            sobat_id: m.sobat_id,
+            kegiatan_id: kegiatanId,
+          }));
+
+          const { error: errPenugasan } = await supabase
+            .from('penugasan')
+            .upsert(penugasanList, { onConflict: 'sobat_id, kegiatan_id' });
+
+          if (errPenugasan) throw errPenugasan;
+        }
+
+        alert(
+          `Berhasil!\n- ${uniqueFormattedData.length} data mitra diimpor/diperbarui.\n- Otomatis terdaftar pada Kegiatan: "${namaKegiatan}".`
+        );
         fetchMitra();
       } catch (err: any) {
         console.error('Error processing Excel:', err);
@@ -150,7 +211,7 @@ export default function MitraPage() {
       }
     };
 
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   };
 
   // Open Modal Tambah Data
@@ -471,7 +532,7 @@ export default function MitraPage() {
                             onClick={() => setCurrentPage(page)}
                             className={`px-3 py-1 rounded font-medium transition ${
                               currentPage === page
-                                ? 'bg-blue-600 text-white border border-blue-600'
+                                ? 'bg-blue-600 text-white'
                                 : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
                             }`}
                           >
@@ -484,7 +545,7 @@ export default function MitraPage() {
                   {/* Tombol Next */}
                   <button
                     onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                    disabled={currentPage === totalPages || totalPages === 0}
+                    disabled={currentPage === totalPages}
                     className="px-2.5 py-1 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                   >
                     ›
@@ -496,13 +557,13 @@ export default function MitraPage() {
         </main>
       </div>
 
-      {/* MODAL FORM TAMBAH / EDIT MITRA */}
+      {/* MODAL TAMBAH / EDIT MITRA */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-lg shadow-lg w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center">
-              <h3 className="font-bold text-slate-800 text-sm">
-                {isEditMode ? 'Edit Data Mitra' : 'Tambah Mitra Manual'}
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h3 className="font-bold text-sm text-slate-800">
+                {isEditMode ? 'Edit Data Mitra' : 'Tambah Mitra Baru'}
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
@@ -514,35 +575,37 @@ export default function MitraPage() {
 
             <form onSubmit={handleSaveMitra} className="p-5 space-y-3 text-xs">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">SOBAT ID *</label>
+                <label className="block font-medium text-slate-700 mb-1">
+                  SOBAT ID <span className="text-rose-500">*</span>
+                </label>
                 <input
                   type="text"
                   name="sobat_id"
                   value={formData.sobat_id}
                   onChange={handleInputChange}
                   disabled={isEditMode}
-                  placeholder="Contoh: 351601001"
-                  className={`w-full px-3 py-2 border rounded outline-none focus:border-blue-500 ${
-                    isEditMode ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white'
-                  }`}
+                  placeholder="Contoh: 3515000123"
+                  className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
                   required
                 />
               </div>
 
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Nama Lengkap Mitra *</label>
+                <label className="block font-medium text-slate-700 mb-1">
+                  Nama Lengkap <span className="text-rose-500">*</span>
+                </label>
                 <input
                   type="text"
                   name="nama_mitra"
                   value={formData.nama_mitra}
                   onChange={handleInputChange}
-                  placeholder="Nama lengkap mitra"
+                  placeholder="Nama sesuai SOBAT"
                   className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
                   required
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">Posisi</label>
                   <input
@@ -554,6 +617,7 @@ export default function MitraPage() {
                     className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
                   />
                 </div>
+
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">Kab/Kota</label>
                   <input
@@ -567,9 +631,21 @@ export default function MitraPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block font-medium text-slate-700 mb-1">Alamat Detail</label>
+                <textarea
+                  name="alamat"
+                  value={formData.alamat}
+                  onChange={handleInputChange}
+                  rows={2}
+                  placeholder="Alamat domisili lengkap"
+                  className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">No. HP / WA</label>
+                  <label className="block font-medium text-slate-700 mb-1">No. Telp / WA</label>
                   <input
                     type="text"
                     name="no_hp"
@@ -579,6 +655,7 @@ export default function MitraPage() {
                     className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
                   />
                 </div>
+
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">Status Keaktifan</label>
                   <select
@@ -593,44 +670,20 @@ export default function MitraPage() {
                 </div>
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Email</label>
-                <input
-                  type="email"
-                  name="email"
-                  value={formData.email}
-                  onChange={handleInputChange}
-                  placeholder="contoh@email.com"
-                  className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Alamat Detail</label>
-                <textarea
-                  name="alamat"
-                  value={formData.alamat}
-                  onChange={handleInputChange}
-                  rows={2}
-                  placeholder="Alamat lengkap mitra"
-                  className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500 resize-none"
-                />
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2 border-t border-slate-100">
+              <div className="pt-3 border-t border-slate-100 flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-medium transition"
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-medium rounded transition"
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded font-medium shadow-sm transition disabled:opacity-50"
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded transition disabled:opacity-50"
                 >
-                  {isSubmitting ? 'Menyimpan...' : 'Simpan Data'}
+                  {isSubmitting ? 'Menyimpan...' : 'Simpan'}
                 </button>
               </div>
             </form>
