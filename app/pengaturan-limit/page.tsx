@@ -12,12 +12,12 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 interface KegiatanOption {
   id: number;
   nama_kegiatan: string;
-  bulan_kegiatan: string;
+  bulan_kegiatan: string; // Format: "YYYY-MM"
 }
 
-interface LimitKegiatan {
+interface LimitHonor {
   id: number;
-  kegiatan_id: number;
+  bulan_periode: string; // Berdasarkan bulan kegiatan, misal "2026-05"
   batas_maksimal: number;
   persen_peringatan: number;
 }
@@ -35,16 +35,16 @@ interface MitraLimitRow {
 export default function PengaturanLimitPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  // Daftar kegiatan untuk dropdown pemilihan
+  // Daftar bulan/periode unik atau daftar kegiatan untuk dropdown
   const [kegiatanList, setKegiatanList] = useState<KegiatanOption[]>([]);
   const [loadingKegiatan, setLoadingKegiatan] = useState<boolean>(true);
-  const [selectedKegiatanId, setSelectedKegiatanId] = useState<string>('');
+  const [selectedBulan, setSelectedBulan] = useState<string>('');
 
-  // Info limit untuk kegiatan terpilih
-  const [limitInfo, setLimitInfo] = useState<LimitKegiatan | null>(null);
+  // Info limit untuk bulan terpilih
+  const [limitInfo, setLimitInfo] = useState<LimitHonor | null>(null);
   const [loadingLimit, setLoadingLimit] = useState<boolean>(false);
 
-  // Rekap mitra pada kegiatan terpilih
+  // Rekap akumulasi mitra pada bulan terpilih
   const [mitraRows, setMitraRows] = useState<MitraLimitRow[]>([]);
   const [loadingRows, setLoadingRows] = useState<boolean>(false);
 
@@ -57,7 +57,7 @@ export default function PengaturanLimitPage() {
   // Modal Tetapkan/Ubah Limit
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [formData, setFormData] = useState({ batas_maksimal: 0, persen_peringatan: 80 });
+  const [formData, setFormData] = useState({ batas_maksimal: 3000000, persen_peringatan: 80 });
 
   const formatRupiah = (val: number) => {
     return new Intl.NumberFormat('id-ID', {
@@ -67,26 +67,21 @@ export default function PengaturanLimitPage() {
     }).format(val);
   };
 
-  // Kegiatan yang sedang dipilih
-  const selectedKegiatan = useMemo(
-    () => kegiatanList.find((k) => String(k.id) === selectedKegiatanId) || null,
-    [kegiatanList, selectedKegiatanId]
-  );
-
-  // 1. Fetch daftar kegiatan untuk dropdown
+  // 1. Fetch daftar kegiatan untuk mendapatkan opsi bulan
   const fetchKegiatanList = useCallback(async () => {
     setLoadingKegiatan(true);
     try {
       const { data, error } = await supabase
         .from('kegiatan')
         .select('id, nama_kegiatan, bulan_kegiatan')
-        .order('created_at', { ascending: false });
+        .order('bulan_kegiatan', { ascending: false });
 
       if (error) throw error;
 
       setKegiatanList(data || []);
       if (data && data.length > 0) {
-        setSelectedKegiatanId((prev) => prev || String(data[0].id));
+        // Default pilih bulan dari kegiatan pertama jika belum ada
+        setSelectedBulan((prev) => prev || data[0].bulan_kegiatan);
       }
     } catch (err: any) {
       console.error('Error fetching kegiatan:', err?.message || err);
@@ -99,18 +94,28 @@ export default function PengaturanLimitPage() {
     fetchKegiatanList();
   }, [fetchKegiatanList]);
 
-  // 2. Fetch info limit_honor BERDASARKAN kegiatan_id
+  // Daftar bulan unik dari seluruh kegiatan agar user bisa memilih berdasarkan Bulan, bukan per nama kegiatan
+  const listBulanUnik = useMemo(() => {
+    const setBulan = new Set<string>();
+    kegiatanList.forEach((k) => {
+      if (k.bulan_kegiatan) setBulan.add(k.bulan_kegiatan);
+    });
+    return Array.from(setBulan).sort().reverse();
+  }, [kegiatanList]);
+
+  // 2. Fetch info limit_honor BERDASARKAN BULAN PERIODE
   const fetchLimitInfo = useCallback(async () => {
-    if (!selectedKegiatanId) {
+    if (!selectedBulan) {
       setLimitInfo(null);
       return;
     }
     setLoadingLimit(true);
     try {
+      // Catatan: Pastikan tabel limit_honor di database memiliki kolom 'bulan_periode' atau disesuaikan dengan skema Anda
       const { data, error } = await supabase
         .from('limit_honor')
-        .select('id, kegiatan_id, batas_maksimal, persen_peringatan')
-        .eq('kegiatan_id', Number(selectedKegiatanId))
+        .select('id, bulan_periode, batas_maksimal, persen_peringatan')
+        .eq('bulan_periode', selectedBulan)
         .maybeSingle();
 
       if (error) throw error;
@@ -121,15 +126,15 @@ export default function PengaturanLimitPage() {
     } finally {
       setLoadingLimit(false);
     }
-  }, [selectedKegiatanId]);
+  }, [selectedBulan]);
 
   useEffect(() => {
     fetchLimitInfo();
   }, [fetchLimitInfo]);
 
-  // 3. Fetch rekap Alokasi + Dicairkan HANYA untuk kegiatan terpilih
+  // 3. Fetch akumulasi Alokasi + Dicairkan BERDASARKAN BULAN PERIODE
   const fetchMitraRows = useCallback(async () => {
-    if (!selectedKegiatanId) {
+    if (!selectedBulan) {
       setMitraRows([]);
       return;
     }
@@ -138,16 +143,17 @@ export default function PengaturanLimitPage() {
       const batasMaksimal = limitInfo?.batas_maksimal || 0;
       const persenPeringatan = limitInfo?.persen_peringatan || 80;
 
-      // a. Penugasan khusus pada kegiatan ini saja
+      // a. Ambil seluruh penugasan mitra pada bulan yang sama
       const { data: penugasanData, error: errPenugasan } = await supabase
         .from('penugasan')
         .select(`
           id,
           sobat_id,
           total_honor,
+          kegiatan!inner ( id, nama_kegiatan, bulan_kegiatan ),
           mitra!inner ( sobat_id, nama_mitra )
         `)
-        .eq('kegiatan_id', Number(selectedKegiatanId));
+        .eq('kegiatan.bulan_kegiatan', selectedBulan);
 
       if (errPenugasan) throw errPenugasan;
 
@@ -165,7 +171,7 @@ export default function PengaturanLimitPage() {
         penugasanIdToSobat[item.id] = sobatId;
       });
 
-      // b. Pencairan honor khusus penugasan kegiatan ini
+      // b. Pencairan honor akumulatif
       const penugasanIds = Object.keys(penugasanIdToSobat).map(Number);
       const dicairkanMap: Record<string, number> = {};
 
@@ -184,14 +190,14 @@ export default function PengaturanLimitPage() {
         });
       }
 
-      // c. Gabungkan baris rekap
+      // c. Akumulasi baris data & tentukan status limit
       const rows: MitraLimitRow[] = Object.entries(alokasiMap).map(([sobatId, v]) => {
         const dicairkan = dicairkanMap[sobatId] || 0;
         const persenTerpakai = batasMaksimal > 0 ? (v.total / batasMaksimal) * 100 : 0;
 
         let status: MitraLimitRow['status'] = 'aman';
-        if (v.total > batasMaksimal) status = 'melebihi';
-        else if (persenTerpakai >= persenPeringatan) status = 'peringatan';
+        if (batasMaksimal > 0 && v.total > batasMaksimal) status = 'melebihi';
+        else if (batasMaksimal > 0 && persenTerpakai >= persenPeringatan) status = 'peringatan';
 
         return {
           sobat_id: sobatId,
@@ -209,12 +215,12 @@ export default function PengaturanLimitPage() {
       setMitraRows(rows);
       setCurrentPage(1);
     } catch (err: any) {
-      console.error('Error fetching mitra rows:', err?.message || err);
+      console.error('Error fetching akumulasi mitra rows:', err?.message || err);
       setMitraRows([]);
     } finally {
       setLoadingRows(false);
     }
-  }, [selectedKegiatanId, limitInfo]);
+  }, [selectedBulan, limitInfo]);
 
   useEffect(() => {
     fetchMitraRows();
@@ -256,17 +262,17 @@ export default function PengaturanLimitPage() {
   // Modal handler
   const handleOpenLimitModal = () => {
     setFormData({
-      batas_maksimal: limitInfo?.batas_maksimal || 0,
+      batas_maksimal: limitInfo?.batas_maksimal || 3000000,
       persen_peringatan: limitInfo?.persen_peringatan || 80,
     });
     setIsModalOpen(true);
   };
 
-  // Simpan limit berdasarkan kegiatan_id
+  // Simpan limit berdasarkan BULAN PERIODE
   const handleSaveLimit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedKegiatanId) {
-      alert('Pilih kegiatan terlebih dahulu.');
+    if (!selectedBulan) {
+      alert('Pilih bulan periode terlebih dahulu.');
       return;
     }
 
@@ -282,18 +288,18 @@ export default function PengaturanLimitPage() {
           .eq('id', limitInfo.id);
 
         if (error) throw error;
-        alert(`Limit untuk kegiatan "${selectedKegiatan?.nama_kegiatan}" berhasil diperbarui.`);
+        alert(`Limit honor untuk periode ${selectedBulan} berhasil diperbarui.`);
       } else {
         const { error } = await supabase.from('limit_honor').insert([
           {
-            kegiatan_id: Number(selectedKegiatanId),
+            bulan_periode: selectedBulan,
             batas_maksimal: Number(formData.batas_maksimal),
             persen_peringatan: Number(formData.persen_peringatan),
           },
         ]);
 
         if (error) throw error;
-        alert(`Limit untuk kegiatan "${selectedKegiatan?.nama_kegiatan}" berhasil ditetapkan.`);
+        alert(`Limit honor untuk periode ${selectedBulan} berhasil ditetapkan.`);
       }
 
       setIsModalOpen(false);
@@ -333,33 +339,35 @@ export default function PengaturanLimitPage() {
       <Sidebar mobileOpen={mobileSidebarOpen} onClose={() => setMobileSidebarOpen(false)} />
 
       <div className="min-h-screen lg:pl-[230px]">
-        <Header title="Pengaturan Limit" onMenuClick={() => setMobileSidebarOpen(true)} />
+        <Header title="Pengaturan Limit Honor Mitra" onMenuClick={() => setMobileSidebarOpen(true)} />
 
         <main className="p-4 sm:p-6 lg:p-8">
           <div className="mx-auto max-w-[1400px]">
-            {/* JUDUL + PILIH KEGIATAN */}
+            {/* JUDUL + PILIH BULAN PERIODE */}
             <div className="flex flex-wrap justify-between items-start gap-4 mb-6">
               <div>
-                <h1 className="text-xl font-bold text-slate-800">Pengaturan Limit Honor per Kegiatan</h1>
+                <h1 className="text-xl font-bold text-slate-800">
+                  Akumulasi & Limit Honor Mitra (Bulanan)
+                </h1>
                 <p className="text-xs text-slate-500 mt-1">
-                  Atur limit maksimal honor mitra khusus untuk kegiatan terpilih.
+                  Menampilkan total gabungan honor mitra dari seluruh kegiatan pada periode bulan yang dipilih.
                 </p>
               </div>
 
               <div className="flex items-center gap-2">
-                <label className="text-xs font-semibold text-slate-600">Kegiatan:</label>
+                <label className="text-xs font-semibold text-slate-600">Pilih Bulan Periode:</label>
                 <select
-                  value={selectedKegiatanId}
-                  onChange={(e) => setSelectedKegiatanId(e.target.value)}
-                  className="py-2 px-3 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 outline-none focus:border-blue-500 min-w-[260px]"
+                  value={selectedBulan}
+                  onChange={(e) => setSelectedBulan(e.target.value)}
+                  className="py-2 px-3 text-xs border border-slate-200 rounded-lg bg-white text-slate-700 outline-none focus:border-blue-500 min-w-[200px]"
                 >
-                  {loadingKegiatan && <option>Memuat kegiatan...</option>}
-                  {!loadingKegiatan && kegiatanList.length === 0 && (
-                    <option value="">Belum ada data kegiatan</option>
+                  {loadingKegiatan && <option>Memuat periode...</option>}
+                  {!loadingKegiatan && listBulanUnik.length === 0 && (
+                    <option value="">Belum ada data bulan</option>
                   )}
-                  {kegiatanList.map((k) => (
-                    <option key={k.id} value={k.id}>
-                      {k.nama_kegiatan} — {k.bulan_kegiatan}
+                  {listBulanUnik.map((bulan) => (
+                    <option key={bulan} value={bulan}>
+                      Periode: {bulan}
                     </option>
                   ))}
                 </select>
@@ -369,12 +377,12 @@ export default function PengaturanLimitPage() {
             {/* KARTU RINGKASAN */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
               <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                <span className="text-xs font-semibold text-slate-500 mb-3">Jumlah Mitra</span>
+                <span className="text-xs font-semibold text-slate-500 mb-3">Jumlah Mitra Aktif</span>
                 <span className="text-xl font-extrabold text-slate-800">{totalMitra}</span>
               </div>
               <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
                 <span className="text-xs font-semibold text-slate-500 mb-3">
-                  Limit Kegiatan
+                  Limit SBM ({selectedBulan || 'Bulan'})
                 </span>
                 <span className="text-xl font-extrabold text-slate-800">
                   {loadingLimit ? '...' : limitInfo ? formatRupiah(limitInfo.batas_maksimal) : (
@@ -383,7 +391,7 @@ export default function PengaturanLimitPage() {
                 </span>
               </div>
               <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                <span className="text-xs font-semibold text-slate-500 mb-3">Total Alokasi</span>
+                <span className="text-xs font-semibold text-slate-500 mb-3">Total Akumulasi Alokasi</span>
                 <span className="text-xl font-extrabold text-slate-800">{formatRupiah(totalAlokasi)}</span>
               </div>
               <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
@@ -396,10 +404,10 @@ export default function PengaturanLimitPage() {
             <div className="mb-6">
               <button
                 onClick={handleOpenLimitModal}
-                disabled={!selectedKegiatanId}
+                disabled={!selectedBulan}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <span>⚙️</span> {limitInfo ? 'Ubah Limit Kegiatan Ini' : 'Tetapkan Limit Kegiatan Ini'}
+                <span>⚙️</span> {limitInfo ? `Ubah Limit Periode (${selectedBulan})` : `Tetapkan Limit Periode (${selectedBulan})`}
               </button>
             </div>
 
@@ -439,7 +447,7 @@ export default function PengaturanLimitPage() {
               </div>
             </div>
 
-            {/* TABEL REKAP MITRA */}
+            {/* TABEL REKAP AKUMULASI MITRA */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs text-slate-700">
@@ -448,10 +456,10 @@ export default function PengaturanLimitPage() {
                       <th className="py-3.5 px-6 text-center w-16">No</th>
                       <th className="py-3.5 px-6">SOBAT ID</th>
                       <th className="py-3.5 px-6">Nama Mitra</th>
-                      <th className="py-3.5 px-6">Limit</th>
-                      <th className="py-3.5 px-6">Alokasi</th>
+                      <th className="py-3.5 px-6">Limit Periode</th>
+                      <th className="py-3.5 px-6">Total Akumulasi Honor</th>
                       <th className="py-3.5 px-6">Dicairkan</th>
-                      <th className="py-3.5 px-6">Sisa Limit</th>
+                      <th className="py-3.5 px-6">Sisa Limit Periode</th>
                       <th className="py-3.5 px-6 text-center">Status</th>
                     </tr>
                   </thead>
@@ -459,19 +467,19 @@ export default function PengaturanLimitPage() {
                     {loadingRows || loadingKegiatan ? (
                       <tr>
                         <td colSpan={8} className="py-8 text-center text-slate-400">
-                          Memuat data...
+                          Memuat data akumulasi honor mitra...
                         </td>
                       </tr>
-                    ) : !selectedKegiatanId ? (
+                    ) : !selectedBulan ? (
                       <tr>
                         <td colSpan={8} className="py-8 text-center text-slate-400">
-                          Pilih kegiatan terlebih dahulu.
+                          Pilih bulan periode terlebih dahulu.
                         </td>
                       </tr>
                     ) : currentData.length === 0 ? (
                       <tr>
                         <td colSpan={8} className="py-8 text-center text-slate-400">
-                          Belum ada mitra yang ditugaskan pada kegiatan ini.
+                          Belum ada penugasan mitra pada periode bulan ini.
                         </td>
                       </tr>
                     ) : (
@@ -492,14 +500,14 @@ export default function PengaturanLimitPage() {
                               <span className="text-slate-400 italic font-normal">-</span>
                             )}
                           </td>
-                          <td className="py-4 px-6 text-slate-600 font-medium">{formatRupiah(item.alokasi)}</td>
+                          <td className="py-4 px-6 font-bold text-slate-800">{formatRupiah(item.alokasi)}</td>
                           <td className="py-4 px-6 text-slate-600 font-medium">{formatRupiah(item.dicairkan)}</td>
                           <td
                             className={`py-4 px-6 font-medium ${
-                              item.sisa < 0 ? 'text-rose-600' : 'text-slate-600'
+                              item.sisa < 0 ? 'text-rose-600 font-semibold' : 'text-slate-600'
                             }`}
                           >
-                            {formatRupiah(item.sisa)}
+                            {limitInfo ? formatRupiah(item.sisa) : '-'}
                           </td>
                           <td className="py-4 px-6 text-center">{statusBadge(item.status)}</td>
                         </tr>
@@ -565,13 +573,13 @@ export default function PengaturanLimitPage() {
         </main>
       </div>
 
-      {/* MODAL TETAPKAN / UBAH LIMIT */}
+      {/* MODAL TETAPKAN / UBAH LIMIT BULANAN */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
               <h3 className="font-bold text-slate-800 text-sm">
-                {limitInfo ? 'Ubah Limit Kegiatan' : 'Tetapkan Limit Kegiatan'}
+                {limitInfo ? 'Ubah Limit Bulanan' : 'Tetapkan Limit Bulanan'}
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
@@ -583,20 +591,20 @@ export default function PengaturanLimitPage() {
 
             <form onSubmit={handleSaveLimit} className="p-6 space-y-4 text-xs">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Nama Kegiatan</label>
+                <label className="block font-semibold text-slate-700 mb-1">Periode Bulan</label>
                 <input
                   type="text"
-                  value={selectedKegiatan ? `${selectedKegiatan.nama_kegiatan} (${selectedKegiatan.bulan_kegiatan})` : ''}
+                  value={selectedBulan || ''}
                   disabled
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-100 text-slate-500"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-100 text-slate-600 font-semibold"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Limit ini hanya berlaku spesifik untuk kegiatan yang dipilih.
+                  Limit honor ini berlaku akumulatif untuk seluruh kegiatan pada bulan ini.
                 </p>
               </div>
 
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Batas Maksimal Honor (Rp) *</label>
+                <label className="block font-semibold text-slate-700 mb-1">Batas Maksimal Honor Bulanan (Rp) *</label>
                 <input
                   type="number"
                   value={formData.batas_maksimal}
@@ -620,7 +628,7 @@ export default function PengaturanLimitPage() {
                   required
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Mitra ditandai "Mendekati Limit" begitu alokasinya mencapai persentase ini dari batas maksimal.
+                  Mitra ditandai "Mendekati Limit" jika akumulasi honornya di bulan ini telah mencapai persentase tersebut.
                 </p>
               </div>
 

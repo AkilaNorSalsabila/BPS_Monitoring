@@ -156,12 +156,12 @@ const assignmentItems = [
   },
   {
     label: 'Penugasan Pegawai',
-    href: '#',
+    href: '/penugasan',
     icon: 'clipboard' as IconName,
   },
   {
     label: 'Monitoring Limit',
-    href: '#',
+    href: '/monitoring-limit',
     icon: 'monitor' as IconName,
   },
 ];
