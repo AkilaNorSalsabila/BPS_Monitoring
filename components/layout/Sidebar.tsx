@@ -1,7 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { getStoredTheme, subscribeThemeChange, THEME_COLORS, ThemeName } from '@/lib/theme';
 
 interface SidebarProps {
   mobileOpen: boolean;
@@ -149,9 +151,9 @@ const dataMasterItems = [
  * Menu Penugasan.
  */
 const assignmentItems = [
-   {
+  {
     label: 'Pengaturan Limit',
-    href: '/pengaturan-limit', // Sesuaikan URL rutenya
+    href: '/pengaturan-limit',
     icon: 'settings' as IconName,
   },
   {
@@ -172,27 +174,45 @@ const assignmentItems = [
 const reportItems = [
   {
     label: 'Rekap',
-    href: '#',
+    href: '/rekap',
     icon: 'table' as IconName,
   },
   {
     label: 'Laporan',
-    href: '#',
+    href: '/laporan-mitra',
     icon: 'file' as IconName,
   },
 ];
 
+/**
+ * Menu Pengaturan (bawah sidebar) -> halaman /settings
+ */
+const settingsItem = {
+  label: 'Pengaturan',
+  href: '/settings',
+  icon: 'settings' as IconName,
+};
+
 export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
+
+  /* ============================================
+     TEMA (Terang / Gelap) — sinkron real-time
+     dengan pilihan di halaman Settings
+  ============================================ */
+  const [theme, setTheme] = useState<ThemeName>('terang');
+
+  useEffect(() => {
+    setTheme(getStoredTheme());
+    return subscribeThemeChange(setTheme);
+  }, []);
+
+  const colors = THEME_COLORS[theme];
 
   /**
    * Komponen untuk menampilkan satu item menu.
    */
-  const renderMenuItem = (item: {
-    label: string;
-    href: string;
-    icon: IconName;
-  }) => {
+  const renderMenuItem = (item: { label: string; href: string; icon: IconName }) => {
     const active = pathname === item.href;
 
     return (
@@ -200,10 +220,9 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         key={item.label}
         href={item.href}
         onClick={item.href !== '#' ? onClose : undefined}
+        style={active ? { backgroundColor: colors.sidebarActiveBg } : undefined}
         className={`flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors ${
-          active
-            ? 'bg-[#2d84d8] font-semibold shadow-sm'
-            : 'text-white/95 hover:bg-white/10'
+          active ? 'font-semibold shadow-sm' : 'text-white/95 hover:bg-white/10'
         }`}
       >
         <Icon name={item.icon} />
@@ -226,17 +245,14 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
       {/* Sidebar utama */}
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r border-blue-400/60 bg-[#07508f] text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
+        style={{ backgroundColor: colors.sidebarBg, borderColor: colors.sidebarBorder }}
+        className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
         {/* LOGO BPS */}
         <div className="flex h-[70px] items-center justify-center border-b border-white/15 px-4">
-          <Link
-            href="/dashboard"
-            onClick={onClose}
-            className="flex items-center justify-center"
-          >
+          <Link href="/dashboard" onClick={onClose} className="flex items-center justify-center">
             <img
               src="/Rectangle 10.png"
               alt="BPS Kota Mojokerto"
@@ -252,52 +268,25 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
           {/* DATA MASTER */}
           <div className="mb-3">
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-              Data Master
-            </div>
-            <div className="space-y-0.5">
-              {dataMasterItems.map((item) => renderMenuItem(item))}
-            </div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Data Master</div>
+            <div className="space-y-0.5">{dataMasterItems.map((item) => renderMenuItem(item))}</div>
           </div>
 
           {/* PENUGASAN */}
           <div className="mb-3">
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-              Penugasan
-            </div>
-            <div className="space-y-0.5">
-              {assignmentItems.map((item) => renderMenuItem(item))}
-            </div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Penugasan</div>
+            <div className="space-y-0.5">{assignmentItems.map((item) => renderMenuItem(item))}</div>
           </div>
 
-          {/* =========================
-              LAPORAN
-          ========================== */}
+          {/* LAPORAN */}
           <div>
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-              Laporan
-            </div>
-
-            <div className="space-y-0.5">
-              {reportItems.map((item) =>
-                renderMenuItem(item)
-              )}
-            </div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Laporan</div>
+            <div className="space-y-0.5">{reportItems.map((item) => renderMenuItem(item))}</div>
           </div>
         </nav>
 
-        {/* =========================
-            PENGATURAN
-        ========================== */}
-        <div className="border-t border-white/10 p-2.5">
-          <Link
-            href="#"
-            className="flex items-center gap-2 rounded-md px-2 py-2 text-[11px] text-white/95 hover:bg-white/10"
-          >
-            <Icon name="settings" />
-            <span>Pengaturan</span>
-          </Link>
-        </div>
+        {/* PENGATURAN (link ke halaman /settings) */}
+        <div className="border-t border-white/10 p-2.5">{renderMenuItem(settingsItem)}</div>
       </aside>
     </>
   );
