@@ -92,18 +92,25 @@ export default function DetailKegiatanPage() {
         setMitraList([]);
         setPencairanList([]);
       } else if (dataPenugasan && dataPenugasan.length > 0) {
-        // 2b. Fetch limit_honor berdasarkan kegiatan_id
+        // 2b. Fetch limit_honor berdasarkan PERIODE (bulan_kegiatan), BUKAN kegiatan_id.
+        // Limit honor bersifat bulanan & berlaku sama untuk semua mitra/kegiatan pada
+        // periode yang sama — ini kunci yang sama dipakai di halaman Pengaturan Limit
+        // dan halaman Penugasan.
         let limitBulanIni: number | null = null;
-        const { data: limitRow, error: errLimit } = await supabase
-          .from('limit_honor')
-          .select('batas_maksimal')
-          .eq('kegiatan_id', targetId)
-          .maybeSingle();
+        const periodeKegiatan = dataKegiatan?.bulan_kegiatan?.trim() || '';
 
-        if (errLimit) {
-          console.error('Error fetching limit_honor:', errLimit.message);
-        } else if (limitRow && limitRow.batas_maksimal !== undefined) {
-          limitBulanIni = Number(limitRow.batas_maksimal);
+        if (periodeKegiatan) {
+          const { data: limitRow, error: errLimit } = await supabase
+            .from('limit_honor')
+            .select('batas_maksimal')
+            .eq('bulan_periode', periodeKegiatan)
+            .maybeSingle();
+
+          if (errLimit) {
+            console.error('Error fetching limit_honor:', errLimit.message);
+          } else if (limitRow && limitRow.batas_maksimal !== undefined) {
+            limitBulanIni = Number(limitRow.batas_maksimal);
+          }
         }
 
         // Format list mitra yang benar-benar ditugaskan

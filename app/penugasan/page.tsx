@@ -82,6 +82,25 @@ interface DuplicateBlockedInfo {
   namaKegiatan: string;
 }
 
+interface PencairanHonor {
+  id?: number;
+  sobat_id: string;
+  penugasan_id: number;
+  tgl_pencairan: string;
+  tahap_ke?: number;
+  nominal_dicairkan: number;
+  bulan_pencairan?: string | null;
+  metode_pembayaran?: string | null;
+  no_referensi_sp2d?: string | null;
+  catatan?: string | null;
+  created_at?: string;
+}
+
+const NAMA_BULAN_ID = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+];
+
 // =========================================================
 // CONSTANT
 // =========================================================
@@ -161,6 +180,17 @@ export default function PenugasanPage() {
 
   const [isDuplicateBlockedModalOpen, setIsDuplicateBlockedModalOpen] = useState<boolean>(false);
   const [duplicateBlockedInfo, setDuplicateBlockedInfo] = useState<DuplicateBlockedInfo | null>(null);
+
+  const [isPencairanModalOpen, setIsPencairanModalOpen] = useState<boolean>(false);
+  const [pencairanPenugasan, setPencairanPenugasan] = useState<PenugasanData | null>(null);
+  const [riwayatPencairan, setRiwayatPencairan] = useState<PencairanHonor[]>([]);
+  const [isLoadingRiwayat, setIsLoadingRiwayat] = useState<boolean>(false);
+  const [isPencairanSubmitting, setIsPencairanSubmitting] = useState<boolean>(false);
+  const [pencairanForm, setPencairanForm] = useState<{ nominal: number; tanggal: string; catatan: string }>({
+    nominal: 0,
+    tanggal: new Date().toISOString().slice(0, 10),
+    catatan: '',
+  });
 
   const fetchDropdownData = useCallback(async () => {
     try {
@@ -691,6 +721,115 @@ export default function PenugasanPage() {
 
   const formatRupiah = (val: number) => `Rp ${val.toLocaleString('id-ID')}`;
 
+  const formatTanggal = (val: string) => {
+    if (!val) return '-';
+    try {
+      return new Date(val).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+    } catch {
+      return val;
+    }
+  };
+
+  const totalRiwayatDicairkan = useMemo(
+    () => riwayatPencairan.reduce((sum, r) => sum + (Number(r.nominal_dicairkan) || 0), 0),
+    [riwayatPencairan]
+  );
+
+  const sisaHonorPencairan = useMemo(() => {
+    const totalHonor = Number(pencairanPenugasan?.total_honor) || 0;
+    return Math.max(totalHonor - totalRiwayatDicairkan, 0);
+  }, [pencairanPenugasan, totalRiwayatDicairkan]);
+
+  const nominalPencairanInvalid =
+    (Number(pencairanForm.nominal) || 0) <= 0 || (Number(pencairanForm.nominal) || 0) > sisaHonorPencairan;
+
+  const handleOpenPencairanModal = async (penugasan: PenugasanData) => {
+    if (!penugasan.id) return;
+
+    setPencairanPenugasan(penugasan);
+    setPencairanForm({
+      nominal: 0,
+      tanggal: new Date().toISOString().slice(0, 10),
+      catatan: '',
+    });
+    setIsPencairanModalOpen(true);
+    setIsLoadingRiwayat(true);
+
+    try {
+      const { data, error } = await supabase
+        .from('pencairan_honor')
+        .select('*')
+        .eq('penugasan_id', penugasan.id)
+        .order('tahap_ke', { ascending: true });
+
+      if (error) throw error;
+      setRiwayatPencairan(data || []);
+    } catch (error: any) {
+      console.error('Error fetching riwayat pencairan:', error?.message || error);
+      alert('Gagal memuat riwayat pencairan: ' + (error?.message || 'Terjadi kesalahan'));
+      setRiwayatPencairan([]);
+    } finally {
+      setIsLoadingRiwayat(false);
+    }
+  };
+
+  const handleSavePencairan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pencairanPenugasan?.id) return;
+
+    const nominal = Number(pencairanForm.nominal) || 0;
+
+    if (nominal <= 0) {
+      alert('Nominal pencairan harus lebih dari 0.');
+      return;
+    }
+
+    if (nominal > sisaHonorPencairan) {
+      alert(
+        `Gagal Menyimpan! Nominal pencairan (${formatRupiah(nominal)}) tidak boleh melebihi sisa honor (${formatRupiah(
+          sisaHonorPencairan
+        )}).`
+      );
+      return;
+    }
+
+    const tanggalObj = new Date(pencairanForm.tanggal);
+    const bulanPencairan = NAMA_BULAN_ID[tanggalObj.getMonth()] || null;
+    const tahapBaru = riwayatPencairan.length + 1;
+
+    setIsPencairanSubmitting(true);
+    try {
+      const { error: insertError } = await supabase.from('pencairan_honor').insert([
+        {
+          sobat_id: pencairanPenugasan.sobat_id,
+          penugasan_id: pencairanPenugasan.id,
+          tgl_pencairan: pencairanForm.tanggal,
+          tahap_ke: tahapBaru,
+          nominal_dicairkan: nominal,
+          bulan_pencairan: bulanPencairan,
+          catatan: pencairanForm.catatan.trim() || null,
+        },
+      ]);
+      if (insertError) throw insertError;
+
+      const newTotalDicairkan = totalRiwayatDicairkan + nominal;
+      const { error: updateError } = await supabase
+        .from('penugasan')
+        .update({ jumlah_dicairkan: newTotalDicairkan })
+        .eq('id', pencairanPenugasan.id);
+      if (updateError) throw updateError;
+
+      alert('Pencairan honor berhasil disimpan.');
+      setIsPencairanModalOpen(false);
+      setPencairanPenugasan(null);
+      fetchPenugasan();
+    } catch (error: any) {
+      alert('Gagal menyimpan pencairan: ' + (error?.message || 'Terjadi kesalahan'));
+    } finally {
+      setIsPencairanSubmitting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-800 font-sans">
       <Sidebar mobileOpen={mobileSidebarOpen} onClose={() => setMobileSidebarOpen(false)} />
@@ -981,6 +1120,13 @@ export default function PenugasanPage() {
                                   ✏️
                                 </button>
                                 <button
+                                  onClick={() => handleOpenPencairanModal(item)}
+                                  className="p-1.5 text-emerald-600 hover:bg-emerald-50 border border-emerald-200 rounded-md transition cursor-pointer"
+                                  title="Pencairan Honor"
+                                >
+                                  💰
+                                </button>
+                                <button
                                   onClick={() => handleDeletePenugasan(item.id!, item.mitra?.nama_mitra || '')}
                                   className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
                                   title="Hapus"
@@ -1170,35 +1316,25 @@ export default function PenugasanPage() {
                       )}
                     </div>
 
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <label className="block text-xs font-semibold text-slate-700">Jumlah Dicairkan (Rp)</label>
-                        {isFullyPaid && (
-                          <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-100 px-1.5 py-0.5 rounded">
-                            Terkunci (Lunas)
-                          </span>
-                        )}
-                      </div>
-                      <input
-                        type="number"
-                        min="0"
-                        max={formData.total_honor || 0}
-                        disabled={isFullyPaid}
-                        value={formData.jumlah_dicairkan || 0}
-                        onChange={(e) => setFormData({ ...formData, jumlah_dicairkan: Number(e.target.value) })}
-                        className={`w-full px-3 py-2 text-xs border rounded-md outline-none transition ${
-                          isFullyPaid
-                            ? 'bg-slate-100 text-slate-500 border-slate-200 cursor-not-allowed'
-                            : 'border-slate-200 focus:border-blue-500 bg-white'
-                        }`}
-                        required
-                      />
-                      {!isFullyPaid && (
+                    {isEditMode && (
+                      <div>
+                        <div className="flex justify-between items-center mb-1">
+                          <label className="block text-xs font-semibold text-slate-700">Jumlah Dicairkan (Rp)</label>
+                          {isFullyPaid && (
+                            <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-100 px-1.5 py-0.5 rounded">
+                              Lunas
+                            </span>
+                          )}
+                        </div>
+                        <div className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-slate-50 text-slate-700 font-semibold">
+                          {formatRupiah(totalCair)}
+                        </div>
                         <p className="text-[10px] text-slate-400 mt-1">
-                          Maksimal pencairan: {formatRupiah(formData.total_honor || 0)}
+                          Nilai ini dihitung otomatis dari riwayat pencairan. Kelola lewat tombol 💰 Pencairan Honor pada
+                          daftar penugasan.
                         </p>
-                      )}
-                    </div>
+                      </div>
+                    )}
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">Status Penugasan</label>
@@ -1469,6 +1605,162 @@ export default function PenugasanPage() {
               >
                 Mengerti
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PENCAIRAN HONOR */}
+      {isPencairanModalOpen && pencairanPenugasan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
+              <h3 className="font-bold text-slate-800 text-sm">Pencairan Honor</h3>
+              <button
+                onClick={() => {
+                  setIsPencairanModalOpen(false);
+                  setPencairanPenugasan(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="overflow-y-auto p-5 space-y-4">
+              {/* RINGKASAN */}
+              <div className="space-y-2 text-xs">
+                <div className="flex justify-between border-b pb-2">
+                  <span className="text-slate-500">Mitra</span>
+                  <span className="font-semibold text-slate-800">{pencairanPenugasan.mitra?.nama_mitra || '-'}</span>
+                </div>
+                <div className="flex justify-between border-b pb-2">
+                  <span className="text-slate-500">Kegiatan</span>
+                  <span className="font-medium text-slate-800 text-right">
+                    {pencairanPenugasan.kegiatan?.nama_kegiatan || '-'}
+                  </span>
+                </div>
+                <div className="flex justify-between border-b pb-2">
+                  <span className="text-slate-500">Hak Honor</span>
+                  <span className="font-semibold text-blue-600">
+                    {formatRupiah(Number(pencairanPenugasan.total_honor) || 0)}
+                  </span>
+                </div>
+                <div className="flex justify-between border-b pb-2">
+                  <span className="text-slate-500">Sudah Dicairkan</span>
+                  <span className="font-semibold text-emerald-600">{formatRupiah(totalRiwayatDicairkan)}</span>
+                </div>
+                <div className="flex justify-between pb-1">
+                  <span className="text-slate-500">Sisa</span>
+                  <span className="font-bold text-amber-600">{formatRupiah(sisaHonorPencairan)}</span>
+                </div>
+              </div>
+
+              {/* RIWAYAT PENCAIRAN */}
+              <div>
+                <h4 className="text-xs font-semibold text-slate-700 mb-2">Riwayat Pencairan</h4>
+                <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-40 overflow-y-auto">
+                  {isLoadingRiwayat ? (
+                    <div className="py-4 text-center text-[11px] text-slate-400">Memuat riwayat...</div>
+                  ) : riwayatPencairan.length === 0 ? (
+                    <div className="py-4 text-center text-[11px] text-slate-400">Belum ada pencairan.</div>
+                  ) : (
+                    riwayatPencairan.map((r, idx) => (
+                      <div key={r.id || idx} className="flex justify-between items-center px-3 py-2 text-xs">
+                        <div>
+                          <div className="font-semibold text-slate-700">Tahap {r.tahap_ke ?? idx + 1}</div>
+                          <div className="text-[10px] text-slate-400">{formatTanggal(r.tgl_pencairan)}</div>
+                          {r.catatan && <div className="text-[10px] text-slate-400 italic">{r.catatan}</div>}
+                        </div>
+                        <div className="font-semibold text-emerald-600">
+                          {formatRupiah(Number(r.nominal_dicairkan) || 0)}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* FORM TAMBAH PENCAIRAN */}
+              {sisaHonorPencairan > 0 ? (
+                <form onSubmit={handleSavePencairan} className="space-y-3 pt-2 border-t border-slate-100">
+                  <h4 className="text-xs font-semibold text-slate-700">Tambah Pencairan</h4>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Nominal (Rp)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max={sisaHonorPencairan}
+                      value={pencairanForm.nominal || 0}
+                      onChange={(e) =>
+                        setPencairanForm((prev) => ({ ...prev, nominal: Number(e.target.value) }))
+                      }
+                      className={`w-full px-3 py-2 text-xs border rounded-md outline-none transition ${
+                        nominalPencairanInvalid && pencairanForm.nominal > 0
+                          ? 'border-rose-400 focus:border-rose-500 bg-rose-50'
+                          : 'border-slate-200 focus:border-blue-500'
+                      }`}
+                      required
+                    />
+                    {pencairanForm.nominal > sisaHonorPencairan ? (
+                      <p className="text-[10px] text-rose-600 font-semibold mt-1">
+                        ⛔ Nominal melebihi sisa honor ({formatRupiah(sisaHonorPencairan)}). Kurangi nominalnya.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-slate-400 mt-1">
+                        Maksimal: {formatRupiah(sisaHonorPencairan)}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal</label>
+                    <input
+                      type="date"
+                      value={pencairanForm.tanggal}
+                      onChange={(e) => setPencairanForm((prev) => ({ ...prev, tanggal: e.target.value }))}
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan (opsional)</label>
+                    <textarea
+                      value={pencairanForm.catatan}
+                      onChange={(e) => setPencairanForm((prev) => ({ ...prev, catatan: e.target.value }))}
+                      rows={2}
+                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none resize-none"
+                      placeholder="Catatan tambahan mengenai pencairan ini..."
+                    />
+                  </div>
+
+                  <div className="pt-2 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsPencairanModalOpen(false);
+                        setPencairanPenugasan(null);
+                      }}
+                      className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium rounded-md transition cursor-pointer"
+                    >
+                      Batal
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isPencairanSubmitting || nominalPencairanInvalid}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isPencairanSubmitting ? 'Menyimpan...' : 'Simpan'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="p-3 rounded-lg text-xs font-medium border bg-emerald-50 text-emerald-800 border-emerald-200 text-center">
+                  ✅ Honor sudah dicairkan penuh (Lunas).
+                </div>
+              )}
             </div>
           </div>
         </div>

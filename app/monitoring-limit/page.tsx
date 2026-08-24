@@ -9,7 +9,7 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-const DEFAULT_LIMIT_BULANAN = 3000000;
+const FALLBACK_LIMIT_BULANAN = 3000000;
 
 interface MonitoringLimitData {
   sobat_id: string;
@@ -49,7 +49,14 @@ export default function MonitoringLimitPage() {
 
   const [kegiatanOptions, setKegiatanOptions] = useState<KegiatanOption[]>([]);
 
-  // State Filter (Default Agustus 2026 sesuai data Supabase)
+  // State untuk Modal Detail Kegiatan
+  const [detailPenugasan, setDetailPenugasan] = useState<MonitoringLimitData | null>(null);
+  const [isDetailModalOpen, setIsDetailModalOpen] = useState<boolean>(false);
+
+  const [limitBulanan, setLimitBulanan] = useState<number>(FALLBACK_LIMIT_BULANAN);
+  const [limitSudahDiatur, setLimitSudahDiatur] = useState<boolean>(false);
+
+  // State Filter
   const [periodeBulan, setPeriodeBulan] = useState<string>('2026-08'); 
   const [statusFilter, setStatusFilter] = useState<string>('Semua');
   const [kegiatanFilter, setKegiatanFilter] = useState<string>('Semua');
@@ -78,42 +85,33 @@ export default function MonitoringLimitPage() {
     fetchKegiatanOptions();
   }, []);
 
-  // Logika Pencocokan Bulan & Tahun Fleksibel
   const isMatchingMonth = (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
     if (!rawDbValue) return false;
     if (!filterYYYYMM) return true;
 
-    const val = String(rawDbValue).trim().toLowerCase(); // Contoh DB: "agustus 2026"
-    const [year, monthNum] = filterYYYYMM.split('-');     // ["2026", "08"]
-    const monthName = BULAN_MAP[monthNum] || '';          // "agustus"
+    const val = String(rawDbValue).trim().toLowerCase(); 
+    const [year, monthNum] = filterYYYYMM.split('-');    
+    const monthName = BULAN_MAP[monthNum] || '';          
 
     const hasMonth = val.includes(monthName);
     const hasYear = val.includes(year);
 
-    // 1. Jika DB tersimpan format teks ("Agustus 2026")
     if (hasMonth && hasYear) return true;
-
-    // 2. Jika DB tersimpan format "2026-08" atau sejenisnya
     if (val.includes(filterYYYYMM) || val.startsWith(filterYYYYMM)) return true;
-
-    // 3. Jika DB hanya berisi nama bulan tanpa tahun
     if (hasMonth && !val.match(/\d{4}/)) return true;
 
     return false;
   };
 
-  // Fetch Data Hasil Agregasi Mitra & Honor
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      // 1. Ambil Data Mitra
       const { data: mitraData, error: mitraErr } = await supabase
         .from('mitra')
         .select('sobat_id, nama_mitra, posisi_mitra');
 
       if (mitraErr) throw mitraErr;
 
-      // 2. Ambil Penugasan beserta relasi ke Kegiatan (mengambil bulan_kegiatan)
       const { data: penugasanData, error: penugasanErr } = await supabase
         .from('penugasan')
         .select(`
@@ -128,15 +126,29 @@ export default function MonitoringLimitPage() {
 
       if (penugasanErr) console.warn('Query penugasan info:', penugasanErr.message);
 
-      // 3. Agregasi Data Mitra berdasarkan Pemfilteran Periode
+      let limitAktif = FALLBACK_LIMIT_BULANAN;
+      let sudahDiatur = false;
+      const { data: limitData, error: limitErr } = await supabase
+        .from('limit_honor')
+        .select('bulan_periode, batas_maksimal');
+
+      if (limitErr) {
+        console.error('Error fetching limit_honor:', limitErr.message);
+      } else if (limitData) {
+        const limitRow = limitData.find((row: any) => isMatchingMonth(row.bulan_periode, periodeBulan));
+        if (limitRow && limitRow.batas_maksimal !== undefined && limitRow.batas_maksimal !== null) {
+          limitAktif = Number(limitRow.batas_maksimal);
+          sudahDiatur = true;
+        }
+      }
+      setLimitBulanan(limitAktif);
+      setLimitSudahDiatur(sudahDiatur);
+
       const computedList: MonitoringLimitData[] = (mitraData || [])
         .map((mitra) => {
           const penugasanMitra = (penugasanData || []).filter((p: any) => {
             if (p.sobat_id !== mitra.sobat_id) return false;
-
-            // Memeriksa bulan_kegiatan dari relasi tabel kegiatan, atau fallback ke bulan_pembayaran
             const bulanTarget = p.kegiatan?.bulan_kegiatan || p.bulan_pembayaran;
-
             return isMatchingMonth(bulanTarget, periodeBulan);
           });
 
@@ -149,8 +161,8 @@ export default function MonitoringLimitPage() {
             .map((p: any) => p.kegiatan?.nama_kegiatan)
             .filter(Boolean);
 
-          const sisa = Math.max(DEFAULT_LIMIT_BULANAN - totalHonor, 0);
-          const persen = Math.round((totalHonor / DEFAULT_LIMIT_BULANAN) * 100);
+          const sisa = Math.max(limitAktif - totalHonor, 0);
+          const persen = limitAktif > 0 ? Math.round((totalHonor / limitAktif) * 100) : 0;
 
           return {
             sobat_id: mitra.sobat_id,
@@ -164,7 +176,6 @@ export default function MonitoringLimitPage() {
               : [],
           };
         })
-        // Menyaring mitra yang hanya memiliki kegiatan/penugasan pada periode terfilter
         .filter((mitra) => mitra.kegiatan_diikuti.length > 0);
 
       setDataList(computedList);
@@ -179,7 +190,6 @@ export default function MonitoringLimitPage() {
     fetchData();
   }, [fetchData]);
 
-  // Logika Filter Multi-Kriteria & Pagination
   const filteredData = useMemo(() => {
     return dataList.filter((item) => {
       const matchSearch =
@@ -232,12 +242,21 @@ export default function MonitoringLimitPage() {
                   Pantau akumulasi penerimaan honor mitra BPS per periode bulanan
                 </p>
               </div>
+              <div
+                className={`text-[11px] font-semibold px-3 py-1.5 rounded-lg border ${
+                  limitSudahDiatur
+                    ? 'bg-blue-50 text-blue-700 border-blue-200'
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                }`}
+              >
+                Limit periode ini: Rp{limitBulanan.toLocaleString('id-ID')}
+                {!limitSudahDiatur && ' (default, belum diatur)'}
+              </div>
             </div>
 
             {/* BAR FILTER */}
             <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 mb-6 flex flex-wrap gap-4 items-center justify-between">
               <div className="flex flex-wrap items-center gap-4 w-full md:w-auto">
-                {/* Filter Periode Input Month */}
                 <div className="flex flex-col gap-1 min-w-[150px]">
                   <label className="text-[11px] font-medium text-slate-400">Periode Bulan</label>
                   <input
@@ -251,7 +270,6 @@ export default function MonitoringLimitPage() {
                   />
                 </div>
 
-                {/* Filter Kegiatan */}
                 <div className="flex flex-col gap-1 min-w-[160px]">
                   <label className="text-[11px] font-medium text-slate-400">Kegiatan</label>
                   <select
@@ -271,7 +289,6 @@ export default function MonitoringLimitPage() {
                   </select>
                 </div>
 
-                {/* Filter Status */}
                 <div className="flex flex-col gap-1 min-w-[150px]">
                   <label className="text-[11px] font-medium text-slate-400">Status Limit</label>
                   <select
@@ -291,7 +308,6 @@ export default function MonitoringLimitPage() {
                 </div>
               </div>
 
-              {/* Input Search */}
               <div className="relative w-full md:w-64">
                 <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-slate-400 text-xs">
                   🔍
@@ -322,60 +338,86 @@ export default function MonitoringLimitPage() {
                       <th className="py-3.5 px-4">Honor Terpakai</th>
                       <th className="py-3.5 px-4">Sisa Limit</th>
                       <th className="py-3.5 px-4 text-center">Prosentase</th>
+                      <th className="py-3.5 px-4 text-center">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {loading ? (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-slate-400">
+                        <td colSpan={8} className="py-8 text-center text-slate-400">
                           Menghitung akumulasi honor...
                         </td>
                       </tr>
                     ) : currentData.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-slate-400">
+                        <td colSpan={8} className="py-8 text-center text-slate-400">
                           Tidak ditemukan data.
                         </td>
                       </tr>
                     ) : (
-                      currentData.map((item, index) => (
-                        <tr key={item.sobat_id || index} className="hover:bg-slate-50/60 transition">
-                          <td className="py-3.5 px-4 text-center font-medium text-slate-400">
-                            {(currentPage - 1) * itemsPerPage + index + 1}
-                          </td>
-                          <td className="py-3.5 px-4 font-semibold text-slate-800">
-                            {item.nama_mitra}
-                            <div className="text-[10px] text-slate-400 font-normal">
-                              {item.posisi_mitra || 'Mitra'}
-                            </div>
-                          </td>
-                          <td className="py-3.5 px-4 font-mono text-blue-600 font-medium">
-                            {item.sobat_id}
-                          </td>
-                          <td className="py-3.5 px-4 text-slate-600 max-w-[200px] truncate">
-                            {item.kegiatan_diikuti.join(', ')}
-                          </td>
-                          <td className="py-3.5 px-4 font-semibold text-slate-700">
-                            Rp{item.total_honor_terpakai.toLocaleString('id-ID')}
-                          </td>
-                          <td className="py-3.5 px-4 font-medium text-slate-500">
-                            Rp{item.sisa_limit.toLocaleString('id-ID')}
-                          </td>
-                          <td className="py-3.5 px-4 text-center">
-                            <span
-                              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
-                                item.persentase >= 100
-                                  ? 'bg-rose-50 text-rose-600 border border-rose-200'
-                                  : item.persentase >= 80
-                                  ? 'bg-amber-50 text-amber-600 border border-amber-200'
-                                  : 'bg-emerald-50 text-emerald-600 border border-emerald-200'
-                              }`}
-                            >
-                              {item.total_honor_terpakai === 0 ? 'Belum Terpakai (0%)' : `${item.persentase}%`}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
+                      currentData.map((item, index) => {
+                        const firstKegiatan = item.kegiatan_diikuti[0] || '-';
+                        const extraCount = item.kegiatan_diikuti.length - 1;
+
+                        return (
+                          <tr key={item.sobat_id || index} className="hover:bg-slate-50/60 transition">
+                            <td className="py-3.5 px-4 text-center font-medium text-slate-400">
+                              {(currentPage - 1) * itemsPerPage + index + 1}
+                            </td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-800">
+                              {item.nama_mitra}
+                              <div className="text-[10px] text-slate-400 font-normal">
+                                {item.posisi_mitra || 'Mitra'}
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-blue-600 font-medium">
+                              {item.sobat_id}
+                            </td>
+                            <td className="py-3.5 px-4 text-slate-600 max-w-[220px]">
+                              <div className="truncate font-medium text-slate-700">
+                                {firstKegiatan}
+                              </div>
+                              {extraCount > 0 && (
+                                <span className="text-[10px] text-blue-600 font-semibold bg-blue-50 px-1.5 py-0.5 rounded-md mt-1 inline-block">
+                                  +{extraCount} kegiatan lainnya
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-700">
+                              Rp{item.total_honor_terpakai.toLocaleString('id-ID')}
+                            </td>
+                            <td className="py-3.5 px-4 font-medium text-slate-500">
+                              Rp{item.sisa_limit.toLocaleString('id-ID')}
+                            </td>
+                            <td className="py-3.5 px-4 text-center">
+                              <span
+                                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+                                  item.persentase >= 100
+                                    ? 'bg-rose-50 text-rose-600 border border-rose-200'
+                                    : item.persentase >= 80
+                                    ? 'bg-amber-50 text-amber-600 border border-amber-200'
+                                    : 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+                                }`}
+                              >
+                                {item.total_honor_terpakai === 0 ? 'Belum Terpakai (0%)' : `${item.persentase}%`}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 text-center">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDetailPenugasan(item);
+                                  setIsDetailModalOpen(true);
+                                }}
+                                className="p-1.5 text-blue-600 hover:bg-blue-50 border border-blue-200 rounded-md transition cursor-pointer mx-auto"
+                                title="Detail"
+                              >
+                                👁️
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -408,6 +450,73 @@ export default function MonitoringLimitPage() {
           </div>
         </main>
       </div>
+
+      {/* MODAL DETAIL KEGIATAN MITRA */}
+      {isDetailModalOpen && detailPenugasan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-100 animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800">Detail Kegiatan Diikuti</h3>
+                <p className="text-[11px] text-slate-500">Daftar lengkap penugasan pada periode ini</p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsDetailModalOpen(false);
+                  setDetailPenugasan(null);
+                }}
+                className="w-7 h-7 rounded-full bg-slate-200/60 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+              <div>
+                <div className="text-[11px] text-slate-400 font-medium">Nama Mitra & SOBAT ID</div>
+                <div className="text-xs font-bold text-slate-800 mt-0.5">
+                  {detailPenugasan.nama_mitra} <span className="text-blue-600 font-mono">({detailPenugasan.sobat_id})</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[11px] text-slate-400 font-medium mb-2">
+                  Daftar Kegiatan ({detailPenugasan.kegiatan_diikuti.length} Kegiatan)
+                </div>
+                <ul className="space-y-2">
+                  {detailPenugasan.kegiatan_diikuti.map((keg, idx) => (
+                    <li key={idx} className="p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs text-slate-700 flex items-start gap-2">
+                      <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
+                        {idx + 1}
+                      </span>
+                      <span className="font-medium">{keg}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100 flex justify-between items-center text-xs">
+                <span className="text-slate-500">Total Honor Terpakai:</span>
+                <span className="font-bold text-slate-800">
+                  Rp{detailPenugasan.total_honor_terpakai.toLocaleString('id-ID')}
+                </span>
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex justify-end">
+              <button
+                onClick={() => {
+                  setIsDetailModalOpen(false);
+                  setDetailPenugasan(null);
+                }}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
