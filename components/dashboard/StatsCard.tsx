@@ -46,9 +46,9 @@ export default function StatsCard({ title, value, helper, tone, icon }: StatsCar
           <CardIcon icon={icon} />
         </div>
         <div className="min-w-0">
-          <div className="text-[7px] font-bold uppercase tracking-wide text-slate-500">{title}</div>
-          <div className="mt-0.5 text-[17px] font-bold leading-tight text-slate-800">{value}</div>
-          <div className={`mt-1 text-[7px] ${colors.helper}`}>{helper}</div>
+          <div className="text-[9px] font-bold uppercase tracking-wide text-slate-500">{title}</div>
+          <div className="mt-0.5 text-[19px] font-bold leading-tight text-slate-800">{value}</div>
+          <div className={`mt-1 text-[9px] ${colors.helper}`}>{helper}</div>
         </div>
       </div>
     </article>

@@ -1,55 +1,70 @@
-const data = [
-  { month: 'Jan', value: 180 },
-  { month: 'Feb', value: 240 },
-  { month: 'Mar', value: 210 },
-  { month: 'Apr', value: 250 },
-  { month: 'Mei', value: 300 },
-  { month: 'Jun', value: 270 },
-  { month: 'Jul', value: 320 },
-  { month: 'Agu', value: 350 },
-];
+'use client';
 
-export default function DisbursementChart() {
-  const max = 350;
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
+export interface DisbursementDataPoint {
+  periode: string; // contoh: "Agustus 2026"
+  total: number; // total pencairan (Rp) pada periode tsb
+}
+
+interface DisbursementChartProps {
+  data: DisbursementDataPoint[];
+  loading?: boolean;
+}
+
+const formatRupiahShort = (val: number) => {
+  if (val >= 1_000_000_000) return `Rp${(val / 1_000_000_000).toFixed(1)}M`;
+  if (val >= 1_000_000) return `Rp${(val / 1_000_000).toFixed(1)}jt`;
+  if (val >= 1_000) return `Rp${(val / 1_000).toFixed(0)}rb`;
+  return `Rp${val}`;
+};
+
+const formatRupiahFull = (val: number) =>
+  new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val);
+
+export default function DisbursementChart({ data, loading }: DisbursementChartProps) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-3 shadow-[0_1px_4px_rgba(15,23,42,0.03)]">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-[10px] font-semibold text-slate-700">Grafik Pencairan (2026)</h2>
-        <select className="rounded border border-slate-200 bg-white px-2 py-1 text-[8px] text-slate-500 outline-none focus:border-blue-400" defaultValue="2026" aria-label="Tahun grafik">
-          <option value="2026">2026</option>
-          <option value="2025">2025</option>
-        </select>
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="mb-3">
+        <h2 className="text-sm font-bold text-slate-800">Grafik Pencairan</h2>
+        <p className="text-[11px] text-slate-500">Total pencairan honor per periode (6 bulan terakhir)</p>
       </div>
 
-      <div className="flex h-[180px] min-w-0">
-        <div className="flex w-7 shrink-0 flex-col justify-between pb-5 pt-1 text-[7px] text-slate-400">
-          <span>350 J</span>
-          <span>250 J</span>
-          <span>150 J</span>
-          <span>50 J</span>
-          <span>0</span>
-        </div>
-        <div className="relative flex-1">
-          <div className="absolute inset-x-0 top-1 bottom-5 flex flex-col justify-between">
-            {[0, 1, 2, 3, 4].map((line) => <div key={line} className="border-t border-dashed border-slate-100" />)}
+      <div className="h-[280px]">
+        {loading ? (
+          <div className="flex h-full items-center justify-center text-xs text-slate-400">
+            Memuat data pencairan...
           </div>
-          <div className="absolute inset-x-1 bottom-0 top-2 flex items-end justify-between gap-2 px-1 sm:gap-3">
-            {data.map((item) => (
-              <div key={item.month} className="flex h-full flex-1 flex-col items-center justify-end">
-                <div className="flex h-[145px] items-end">
-                  <div
-                    title={`${item.month}: ${item.value} J`}
-                    className="w-3 rounded-t-[2px] bg-[#3478c8] transition-all hover:bg-[#2568b5] sm:w-3.5"
-                    style={{ height: `${(item.value / max) * 100}%` }}
-                  />
-                </div>
-                <span className="mt-2 text-[7px] text-slate-400">{item.month}</span>
-              </div>
-            ))}
+        ) : data.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-xs text-slate-400">
+            Belum ada data pencairan.
           </div>
-        </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+              <XAxis
+                dataKey="periode"
+                tick={{ fontSize: 10, fill: '#64748b' }}
+                axisLine={{ stroke: '#e2e8f0' }}
+                tickLine={false}
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: '#64748b' }}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={formatRupiahShort}
+                width={56}
+              />
+              <Tooltip
+                formatter={(value: any) => [formatRupiahFull(Number(value)), 'Total Pencairan']}
+                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
+              />
+              <Bar dataKey="total" fill="#2563eb" radius={[6, 6, 0, 0]} maxBarSize={40} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
       </div>
-    </section>
+    </div>
   );
 }
