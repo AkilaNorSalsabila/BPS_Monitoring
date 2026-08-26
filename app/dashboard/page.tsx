@@ -24,7 +24,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const DEFAULT_LIMIT = 3000000;
 
-const PERIODE_OPTIONS = ['Agustus 2026'];
+const DEFAULT_PERIODE = 'Agustus 2026';
 
 const BULAN_URUTAN: Record<string, number> = {
   januari: 1,
@@ -81,7 +81,8 @@ interface LimitHonorRow {
 export default function DashboardPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  const [periodeBulan, setPeriodeBulan] = useState<string>('Agustus 2026');
+  const [periodeBulan, setPeriodeBulan] = useState<string>(DEFAULT_PERIODE);
+  const [periodeOptions, setPeriodeOptions] = useState<string[]>([]);
 
   const [mitraList, setMitraList] = useState<MitraRow[]>([]);
   const [penugasanList, setPenugasanList] = useState<PenugasanRow[]>([]);
@@ -114,15 +115,58 @@ export default function DashboardPage() {
       const { data: limitData, error: limitErr } = await supabase
         .from('limit_honor')
         .select('bulan_periode, batas_maksimal, persen_peringatan');
+
       if (limitErr) {
         console.error('Error fetch limit_honor:', limitErr);
-      } else {
-        const map: Record<string, LimitHonorRow> = {};
-        (limitData || []).forEach((row: LimitHonorRow) => {
-          map[row.bulan_periode] = row;
-        });
-        setLimitByPeriode(map);
       }
+
+      const map: Record<string, LimitHonorRow> = {};
+      (limitData || []).forEach((row: LimitHonorRow) => {
+        if (row.bulan_periode) {
+          map[String(row.bulan_periode).trim()] = row;
+        }
+      });
+      setLimitByPeriode(map);
+
+      // Periode dashboard diambil dari DATA AKTUAL, bukan hard-code.
+      // Sumber periode:
+      // 1. kegiatan.bulan_kegiatan melalui penugasan
+      // 2. limit_honor.bulan_periode
+      //
+      // Dengan demikian Januari, Februari, dst. akan ikut muncul
+      // selama memang terdapat datanya.
+      const periodeSet = new Set<string>();
+
+      (penugasanData || []).forEach((item: any) => {
+        const periode = item?.kegiatan?.bulan_kegiatan;
+        if (periode) periodeSet.add(String(periode).trim());
+      });
+
+      (limitData || []).forEach((row: LimitHonorRow) => {
+        if (row.bulan_periode) {
+          periodeSet.add(String(row.bulan_periode).trim());
+        }
+      });
+
+      const dynamicPeriodeOptions = Array.from(periodeSet).sort(
+        (a, b) => periodeToSortKey(a) - periodeToSortKey(b)
+      );
+
+      setPeriodeOptions(dynamicPeriodeOptions);
+
+      // Pertahankan Agustus 2026 jika ada. Jika tidak ada, gunakan
+      // periode terbaru yang tersedia.
+      setPeriodeBulan((current) => {
+        if (dynamicPeriodeOptions.includes(current)) {
+          return current;
+        }
+
+        if (dynamicPeriodeOptions.includes(DEFAULT_PERIODE)) {
+          return DEFAULT_PERIODE;
+        }
+
+        return dynamicPeriodeOptions[dynamicPeriodeOptions.length - 1] || current;
+      });
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
     } finally {
@@ -152,7 +196,15 @@ export default function DashboardPage() {
 
   const getLimitForPeriode = useCallback(
     (periode: string) => {
-      const info = limitByPeriode[periode];
+      const normalized = String(periode || '').trim().toLowerCase();
+
+      const info =
+        limitByPeriode[periode] ||
+        Object.values(limitByPeriode).find(
+          (row) =>
+            String(row.bulan_periode || '').trim().toLowerCase() === normalized
+        );
+
       return {
         maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
         warnPercent: info?.persen_peringatan ?? 80,
@@ -172,16 +224,36 @@ export default function DashboardPage() {
     let totalPencairanPeriode = 0;
 
     mitraList.forEach((mitra) => {
-      const acc = accumulatedBySobatPeriode[`${mitra.sobat_id}__${periodeBulan}`];
-      const totalHonor = acc?.totalHonor || 0;
+      const acc =
+        accumulatedBySobatPeriode[
+          `${mitra.sobat_id}__${periodeBulan}`
+        ];
+
+      if (!acc) return;
+
+      const totalHonor = acc.totalHonor || 0;
+
       if (totalHonor >= maxLimit && totalHonor > 0) {
         sudahLimit += 1;
       }
-      totalPencairanPeriode += acc?.totalDicairkan || 0;
+
+      totalPencairanPeriode +=
+        acc.totalDicairkan || 0;
     });
 
-    const totalPegawai = mitraList.length;
-    const masihTersedia = totalPegawai - sudahLimit;
+    // Total pegawai pada dashboard mengikuti periode terpilih:
+    // hanya mitra yang mempunyai penugasan pada periode tersebut.
+    const mitraPeriode = new Set<string>();
+
+    penugasanList.forEach((item) => {
+      const periode = item.kegiatan?.bulan_kegiatan || '';
+      if (periode === periodeBulan && item.sobat_id) {
+        mitraPeriode.add(item.sobat_id);
+      }
+    });
+
+    const totalPegawai = mitraPeriode.size;
+    const masihTersedia = Math.max(totalPegawai - sudahLimit, 0);
 
     return {
       totalPegawai,
@@ -194,8 +266,9 @@ export default function DashboardPage() {
   }, [mitraList, accumulatedBySobatPeriode, periodeBulan, getLimitForPeriode]);
 
   /* ============================================
-     GRAFIK PENCAIRAN: 6 periode terakhir yang muncul di data,
-     total jumlah_dicairkan per periode
+     GRAFIK PENCAIRAN
+     Menampilkan 6 periode terakhir yang memang ada di data.
+     Statistik kartu dan tabel tetap mengikuti periode dropdown.
   ============================================ */
   const disbursementData: DisbursementDataPoint[] = useMemo(() => {
     const totalPerPeriode: Record<string, number> = {};
@@ -269,7 +342,7 @@ export default function DashboardPage() {
                 className="rounded border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] text-slate-600 shadow-sm outline-none focus:border-blue-400"
                 aria-label="Periode dashboard"
               >
-                {PERIODE_OPTIONS.map((p) => (
+                {periodeOptions.map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

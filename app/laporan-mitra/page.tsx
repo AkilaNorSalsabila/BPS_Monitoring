@@ -18,7 +18,7 @@ const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // =========================================================
-// CONSTANT (disamakan persis dengan halaman Penugasan)
+// CONSTANT
 // =========================================================
 
 const DEFAULT_LIMIT = 3000000;
@@ -70,8 +70,9 @@ const BULAN_NUMBER: Record<string, string> = {
   Desember: '12',
 };
 
-// Status limit yang ditampilkan di laporan ini (hanya yang "kena limit")
-const STATUS_FILTER_OPTIONS = ['Semua', 'Mendekati Limit', 'Limit Terlampaui'];
+// Laporan hanya menampilkan mitra/pegawai yang SUDAH mencapai limit.
+// "Mencapai limit" = total hak honor alokasi >= batas maksimal periode.
+const STATUS_FILTER_OPTIONS = ['Semua', 'Mencapai Limit', 'Limit Terlampaui'];
 
 // =========================================================
 // INTERFACE
@@ -79,7 +80,7 @@ const STATUS_FILTER_OPTIONS = ['Semua', 'Mendekati Limit', 'Limit Terlampaui'];
 
 interface LimitHonor {
   id: number;
-  tahun_bulan: string;
+  bulan_periode: string;
   batas_maksimal: number;
   persen_peringatan: number;
 }
@@ -107,7 +108,7 @@ interface PenugasanRaw {
   };
 }
 
-type StatusLimit = 'Tersedia' | 'Mendekati Limit' | 'Limit Terlampaui';
+type StatusLimit = 'Mencapai Limit' | 'Limit Terlampaui';
 
 interface LaporanRow {
   id: number;
@@ -117,8 +118,19 @@ interface LaporanRow {
   kegiatanId: number;
   namaKegiatan: string;
   periode: string;
-  terpakai: number; // akumulasi honor pegawai di periode ini (semua kegiatan)
-  limit: number; // limit pegawai untuk periode ini
+
+  // Hak honor alokasi pada penugasan terkait.
+  terpakai: number;
+
+  // Sisa limit periode, mengikuti logika halaman Penugasan.
+  limit: number;
+
+  // Total hak honor alokasi seluruh penugasan mitra pada periode.
+  totalAllocated: number;
+
+  // Batas maksimal limit periode.
+  maxLimit: number;
+
   presentase: number;
   status: StatusLimit;
 }
@@ -127,7 +139,8 @@ interface LaporanRow {
 // HELPER
 // =========================================================
 
-const formatRupiah = (val: number) => `Rp${(val || 0).toLocaleString('id-ID')}`;
+const formatRupiah = (val: number) =>
+  `Rp${(val || 0).toLocaleString('id-ID')}`;
 
 function statusBadge(status: StatusLimit) {
   if (status === 'Limit Terlampaui') {
@@ -137,24 +150,18 @@ function statusBadge(status: StatusLimit) {
       </span>
     );
   }
-  if (status === 'Mendekati Limit') {
-    return (
-      <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-        Mendekati Limit
-      </span>
-    );
-  }
+
   return (
-    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-      Tersedia
+    <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+      Mencapai Limit
     </span>
   );
 }
 
 function presentaseColor(status: StatusLimit) {
-  if (status === 'Limit Terlampaui') return 'text-rose-600';
-  if (status === 'Mendekati Limit') return 'text-amber-600';
-  return 'text-emerald-600';
+  return status === 'Limit Terlampaui'
+    ? 'text-rose-600'
+    : 'text-amber-600';
 }
 
 // =========================================================
@@ -171,71 +178,100 @@ export default function LaporanPegawaiLimitPage() {
   const [loading, setLoading] = useState(true);
 
   // Filter
-  const [searchKeyword, setSearchKeyword] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<string>('Semua');
-  const [kegiatanFilter, setKegiatanFilter] = useState<string>('Semua Kegiatan');
-  const [bulanFilter, setBulanFilter] = useState<string>('Semua Bulan');
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [statusFilter, setStatusFilter] = useState('Semua');
+  const [kegiatanFilter, setKegiatanFilter] = useState('Semua Kegiatan');
+  const [bulanFilter, setBulanFilter] = useState('Semua Bulan');
 
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState<number>(10);
+  const [itemsPerPage, setItemsPerPage] = useState(10);
 
-  /* ============================================
-     LOGIKA PENCOCOKAN BULAN & TAHUN FLEKSIBEL
-  ============================================ */
-  const isMatchingMonth = (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
-    if (!rawDbValue) return false;
-    if (!filterYYYYMM) return true;
+  // =========================================================
+  // MATCHING PERIODE
+  // =========================================================
 
-    const val = String(rawDbValue).trim().toLowerCase();
-    const [year, monthNum] = filterYYYYMM.split('-');
-    const monthName = BULAN_MAP[monthNum] || '';
+  const isMatchingMonth = useCallback(
+    (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
+      if (!rawDbValue) return false;
+      if (!filterYYYYMM) return true;
 
-    const hasMonth = val.includes(monthName);
-    const hasYear = val.includes(year);
+      const val = String(rawDbValue).trim().toLowerCase();
+      const [year, monthNum] = filterYYYYMM.split('-');
+      const monthName = BULAN_MAP[monthNum] || '';
 
-    if (hasMonth && hasYear) return true;
-    if (val.includes(filterYYYYMM) || val.startsWith(filterYYYYMM)) return true;
-    if (hasMonth && !val.match(/\d{4}/)) return true;
+      const hasMonth = val.includes(monthName);
+      const hasYear = val.includes(year);
 
-    return false;
-  };
+      if (hasMonth && hasYear) return true;
+      if (val.includes(filterYYYYMM) || val.startsWith(filterYYYYMM)) return true;
+      if (hasMonth && !val.match(/\d{4}/)) return true;
 
-  /* ============================================
-     FETCH DATA PENDUKUNG (kegiatan & limit_honor)
-  ============================================ */
+      return false;
+    },
+    []
+  );
+
+  // =========================================================
+  // FETCH KEGIATAN
+  // =========================================================
+
   const fetchKegiatanOptions = useCallback(async () => {
     try {
-      const { data, error } = await supabase.from('kegiatan').select('id, nama_kegiatan');
-      if (!error && data) setKegiatanOptions(data);
+      const { data, error } = await supabase
+        .from('kegiatan')
+        .select('id, nama_kegiatan')
+        .order('nama_kegiatan');
+
+      if (error) {
+        console.error('Error fetching kegiatan options:', error.message);
+        return;
+      }
+
+      setKegiatanOptions(data || []);
     } catch (err) {
       console.error('Error fetching kegiatan options:', err);
     }
   }, []);
 
+  // =========================================================
+  // FETCH LIMIT HONOR
+  //
+  // PENTING:
+  // Halaman Penugasan menggunakan kolom `bulan_periode`,
+  // bukan `tahun_bulan`.
+  // =========================================================
+
   const fetchLimitHonor = useCallback(async () => {
     try {
-      const { data: resLimit, error: errLimit } = await supabase
+      const { data, error } = await supabase
         .from('limit_honor')
-        .select('id, tahun_bulan, batas_maksimal, persen_peringatan');
+        .select('id, bulan_periode, batas_maksimal, persen_peringatan');
 
-      if (!errLimit && resLimit) {
-        const map: Record<string, LimitHonor> = {};
-        resLimit.forEach((row: LimitHonor) => {
-          map[row.tahun_bulan] = row;
-        });
-        setLimitByPeriode(map);
+      if (error) {
+        console.error('Error fetching limit_honor:', error.message);
+        return;
       }
+
+      const map: Record<string, LimitHonor> = {};
+
+      (data || []).forEach((row: LimitHonor) => {
+        map[row.bulan_periode] = row;
+      });
+
+      setLimitByPeriode(map);
     } catch (err) {
       console.error('Error fetching limit_honor:', err);
     }
   }, []);
 
-  /* ============================================
-     FETCH DATA PENUGASAN (dasar perhitungan laporan)
-  ============================================ */
+  // =========================================================
+  // FETCH PENUGASAN
+  // =========================================================
+
   const fetchLaporan = useCallback(async () => {
     setLoading(true);
+
     try {
       const { data, error } = await supabase
         .from('penugasan')
@@ -245,6 +281,7 @@ export default function LaporanPegawaiLimitPage() {
           sobat_id,
           kegiatan_id,
           total_honor,
+          created_at,
           mitra:sobat_id (
             sobat_id,
             nama_mitra
@@ -260,10 +297,11 @@ export default function LaporanPegawaiLimitPage() {
 
       if (error) throw error;
 
-      setRawData((data as any) || []);
+      setRawData((data as unknown as PenugasanRaw[]) || []);
       setCurrentPage(1);
     } catch (err) {
       console.error('Error fetching laporan:', err);
+      setRawData([]);
     } finally {
       setLoading(false);
     }
@@ -275,12 +313,15 @@ export default function LaporanPegawaiLimitPage() {
     fetchLaporan();
   }, [fetchKegiatanOptions, fetchLimitHonor, fetchLaporan]);
 
-  /* ============================================
-     GET LIMIT PERIODE (identik dengan Penugasan)
-  ============================================ */
+  // =========================================================
+  // GET LIMIT PERIODE
+  // Sama dengan halaman Penugasan
+  // =========================================================
+
   const getLimitForPeriode = useCallback(
     (periode: string) => {
       const info = limitByPeriode[periode];
+
       return {
         maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
         warnPercent: info?.persen_peringatan ?? DEFAULT_WARN_PERCENT,
@@ -289,313 +330,640 @@ export default function LaporanPegawaiLimitPage() {
     [limitByPeriode]
   );
 
-  /* ============================================
-     AKUMULASI HONOR PEGAWAI PER PERIODE
-     (identik dengan accumulatedHonorBySobatPeriode di Penugasan)
-  ============================================ */
+  // =========================================================
+  // AKUMULASI HAK HONOR ALOKASI PER MITRA + PERIODE
+  //
+  // Ini mengikuti:
+  // accumulatedHonorBySobatPeriode pada halaman Penugasan.
+  //
+  // Jadi:
+  // totalAllocated = SUM(penugasan.total_honor)
+  // untuk SOBAT yang sama pada periode yang sama.
+  // =========================================================
+
   const accumulatedHonorBySobatPeriode = useMemo(() => {
     const map: Record<string, number> = {};
+
     rawData.forEach((item) => {
       const periode = item.kegiatan?.bulan_kegiatan || '';
+      if (!item.sobat_id || !periode) return;
+
       const key = `${item.sobat_id}__${periode}`;
-      map[key] = (map[key] || 0) + (Number(item.total_honor) || 0);
+
+      map[key] =
+        (map[key] || 0) +
+        (Number(item.total_honor) || 0);
     });
+
     return map;
   }, [rawData]);
 
-  /* ============================================
-     SUSUN BARIS LAPORAN
-     Terpakai & Limit = milik PEGAWAI di periode itu (akumulasi semua
-     kegiatannya), bukan milik satu kegiatan saja.
-  ============================================ */
+  // =========================================================
+  // SUSUN DATA LAPORAN
+  //
+  // PERUBAHAN UTAMA:
+  //
+  // 1. `terpakai` sekarang berisi HAK HONOR ALOKASI
+  //    dari penugasan, bukan akumulasi limit.
+  //
+  // 2. `limit` sekarang berisi SISA LIMIT PERIODE:
+  //    maxLimit - totalAllocated
+  //
+  // 3. Status hanya:
+  //    - Mencapai Limit
+  //    - Limit Terlampaui
+  //
+  // 4. Persentase berdasarkan total hak honor alokasi
+  //    terhadap batas maksimal periode.
+  // =========================================================
+
   const laporanList: LaporanRow[] = useMemo(() => {
-    return rawData.map((item) => {
-      const periode = item.kegiatan?.bulan_kegiatan || '-';
-      const { maxLimit, warnPercent } = getLimitForPeriode(periode);
+    return rawData
+      .map((item) => {
+        const periode = item.kegiatan?.bulan_kegiatan || '';
+        const { maxLimit } = getLimitForPeriode(periode);
 
-      const terpakai = accumulatedHonorBySobatPeriode[`${item.sobat_id}__${periode}`] || 0;
-      const usageRatio = maxLimit > 0 ? (terpakai / maxLimit) * 100 : 0;
-      const presentase = Math.round(usageRatio);
+        const totalAllocated =
+          accumulatedHonorBySobatPeriode[
+            `${item.sobat_id}__${periode}`
+          ] || 0;
 
-      let status: StatusLimit = 'Tersedia';
-      if (usageRatio >= 100) {
-        status = 'Limit Terlampaui';
-      } else if (usageRatio >= warnPercent) {
-        status = 'Mendekati Limit';
+        const hakHonorAlokasi =
+          Number(item.total_honor) || 0;
+
+        // Sama seperti halaman Penugasan:
+        // sisaLimit = maxLimit - totalAllocated
+        //
+        // Untuk laporan, nilai tidak dibuat negatif karena
+        // yang ditampilkan adalah "sisa limit".
+        const sisaLimit = Math.max(
+          maxLimit - totalAllocated,
+          0
+        );
+
+        const usageRatio =
+          maxLimit > 0
+            ? (totalAllocated / maxLimit) * 100
+            : 0;
+
+        // Persentase boleh dihitung >100 secara internal,
+        // tetapi tampilan dibatasi maksimal 100%.
+        const presentase = Math.min(
+          Math.round(usageRatio),
+          100
+        );
+
+        const status: StatusLimit =
+          usageRatio >= 100
+            ? 'Limit Terlampaui'
+            : 'Mencapai Limit';
+
+        return {
+          id: item.id,
+          sobatId: item.sobat_id,
+          namaPegawai: item.mitra?.nama_mitra || '-',
+          nikNip: item.mitra?.sobat_id || item.sobat_id,
+          kegiatanId:
+            item.kegiatan?.id || item.kegiatan_id,
+          namaKegiatan:
+            item.kegiatan?.nama_kegiatan || '-',
+          periode,
+          terpakai: hakHonorAlokasi,
+          limit: sisaLimit,
+          totalAllocated,
+          maxLimit,
+          presentase,
+          status,
+        };
+      })
+      // HANYA data yang mencapai / melewati limit.
+      .filter((row) => {
+        const usageRatio =
+          row.maxLimit > 0
+            ? (row.totalAllocated / row.maxLimit) * 100
+            : 0;
+
+        return usageRatio >= 100;
+      });
+  }, [
+    rawData,
+    accumulatedHonorBySobatPeriode,
+    getLimitForPeriode,
+  ]);
+
+  // =========================================================
+  // FILTER
+  // =========================================================
+
+  const filteredLaporan = useMemo(() => {
+    return laporanList.filter((row) => {
+      const keyword =
+        searchKeyword.trim().toLowerCase();
+
+      const matchSearch =
+        !keyword ||
+        row.namaPegawai
+          .toLowerCase()
+          .includes(keyword) ||
+        row.nikNip
+          .toLowerCase()
+          .includes(keyword) ||
+        row.namaKegiatan
+          .toLowerCase()
+          .includes(keyword) ||
+        row.sobatId
+          .toLowerCase()
+          .includes(keyword);
+
+      let matchBulan = true;
+
+      if (bulanFilter !== 'Semua Bulan') {
+        const monthNumber =
+          BULAN_NUMBER[bulanFilter];
+
+        matchBulan = isMatchingMonth(
+          row.periode,
+          `2026-${monthNumber}`
+        );
       }
 
-      return {
-        id: item.id,
-        sobatId: item.sobat_id,
-        namaPegawai: item.mitra?.nama_mitra || '-',
-        nikNip: item.mitra?.sobat_id || item.sobat_id,
-        kegiatanId: item.kegiatan?.id || item.kegiatan_id,
-        namaKegiatan: item.kegiatan?.nama_kegiatan || '-',
-        periode,
-        terpakai,
-        limit: maxLimit,
-        presentase,
-        status,
-      };
+      const matchKegiatan =
+        kegiatanFilter === 'Semua Kegiatan' ||
+        row.namaKegiatan === kegiatanFilter;
+
+      const matchStatus =
+        statusFilter === 'Semua' ||
+        row.status === statusFilter;
+
+      return (
+        matchSearch &&
+        matchBulan &&
+        matchKegiatan &&
+        matchStatus
+      );
     });
-  }, [rawData, accumulatedHonorBySobatPeriode, getLimitForPeriode]);
+  }, [
+    laporanList,
+    searchKeyword,
+    bulanFilter,
+    kegiatanFilter,
+    statusFilter,
+    isMatchingMonth,
+  ]);
 
-  /* ============================================
-     FILTER
-     - Dasar: hanya pegawai yang SUDAH kena limit (Mendekati/Melebihi),
-       pegawai berstatus "Tersedia" tidak ditampilkan di laporan ini.
-     - Search, Kegiatan, Bulan, Status: mempersempit dari dasar tsb.
-  ============================================ */
-  const filteredLaporan = useMemo(() => {
-    return laporanList
-      .filter((row) => row.status !== 'Tersedia')
-      .filter((row) => {
-        const keyword = searchKeyword.trim().toLowerCase();
+  // =========================================================
+  // PAGINATION
+  // =========================================================
 
-        const matchSearch =
-          !keyword ||
-          row.namaPegawai.toLowerCase().includes(keyword) ||
-          row.nikNip.toLowerCase().includes(keyword) ||
-          row.namaKegiatan.toLowerCase().includes(keyword);
-
-        let matchBulan = true;
-        if (bulanFilter !== 'Semua Bulan') {
-          const monthNumber = BULAN_NUMBER[bulanFilter];
-          matchBulan = isMatchingMonth(row.periode, `2026-${monthNumber}`);
-        }
-
-        const matchKegiatan = kegiatanFilter === 'Semua Kegiatan' || row.namaKegiatan === kegiatanFilter;
-        const matchStatus = statusFilter === 'Semua' || row.status === statusFilter;
-
-        return matchSearch && matchBulan && matchKegiatan && matchStatus;
-      });
-  }, [laporanList, searchKeyword, bulanFilter, kegiatanFilter, statusFilter]);
-
-  /* ============================================
-     PAGINATION
-  ============================================ */
   const totalItems = filteredLaporan.length;
-  const totalPages = Math.ceil(totalItems / itemsPerPage) || 1;
+
+  const totalPages =
+    Math.ceil(totalItems / itemsPerPage) || 1;
 
   const currentData = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filteredLaporan.slice(start, start + itemsPerPage);
-  }, [filteredLaporan, currentPage, itemsPerPage]);
+    const start =
+      (currentPage - 1) * itemsPerPage;
 
-  const startItem = totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
-  const endItem = Math.min(currentPage * itemsPerPage, totalItems);
+    return filteredLaporan.slice(
+      start,
+      start + itemsPerPage
+    );
+  }, [
+    filteredLaporan,
+    currentPage,
+    itemsPerPage,
+  ]);
 
-  /* ============================================
-     EXPORT EXCEL
-  ============================================ */
+  const startItem =
+    totalItems === 0
+      ? 0
+      : (currentPage - 1) * itemsPerPage + 1;
+
+  const endItem = Math.min(
+    currentPage * itemsPerPage,
+    totalItems
+  );
+
+  // =========================================================
+  // EXPORT EXCEL
+  // =========================================================
+
   const handleExportExcel = async () => {
     if (filteredLaporan.length === 0) {
-      alert('Tidak ada data untuk diekspor.');
+      alert('Tidak ada data mitra yang mencapai limit untuk diekspor.');
       return;
     }
 
     try {
       const XLSX = await import('xlsx');
 
-      const rows = filteredLaporan.map((row, index) => ({
-        No: index + 1,
-        'Nama Pegawai': row.namaPegawai,
-        'NIK/NIP': row.nikNip,
-        Kegiatan: row.namaKegiatan,
-        Periode: row.periode,
-        'Terpakai (Pegawai)': row.terpakai,
-        'Limit (Pegawai)': row.limit,
-        'Presentase (%)': row.presentase,
-        Status: row.status,
-      }));
+      const rows = filteredLaporan.map(
+        (row, index) => ({
+          No: index + 1,
+          'Nama Mitra/Pegawai':
+            row.namaPegawai,
+          'SOBAT ID / NIK/NIP':
+            row.nikNip,
+          Kegiatan: row.namaKegiatan,
+          Periode: row.periode,
 
-      const worksheet = XLSX.utils.json_to_sheet(rows);
+          // Sesuai permintaan:
+          'Hak Honor Alokasi':
+            row.terpakai,
+
+          // Sesuai permintaan:
+          'Sisa Limit Periode':
+            row.limit,
+
+          'Total Alokasi Periode':
+            row.totalAllocated,
+
+          'Batas Limit Periode':
+            row.maxLimit,
+
+          'Persentase (%)':
+            row.presentase,
+
+          Status: row.status,
+        })
+      );
+
+      const worksheet =
+        XLSX.utils.json_to_sheet(rows);
+
       worksheet['!cols'] = [
         { wch: 5 },
-        { wch: 25 },
+        { wch: 28 },
+        { wch: 20 },
+        { wch: 32 },
+        { wch: 16 },
+        { wch: 20 },
+        { wch: 22 },
+        { wch: 24 },
+        { wch: 22 },
         { wch: 15 },
-        { wch: 30 },
-        { wch: 16 },
-        { wch: 18 },
-        { wch: 18 },
-        { wch: 12 },
-        { wch: 16 },
+        { wch: 20 },
       ];
 
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'Laporan Pegawai Limit');
+      const workbook =
+        XLSX.utils.book_new();
 
-      const tanggal = new Date().toISOString().slice(0, 10);
-      XLSX.writeFile(workbook, `Laporan-Pegawai-Limit-${tanggal}.xlsx`);
+      XLSX.utils.book_append_sheet(
+        workbook,
+        worksheet,
+        'Laporan Mitra Limit'
+      );
+
+      const tanggal =
+        new Date()
+          .toISOString()
+          .slice(0, 10);
+
+      XLSX.writeFile(
+        workbook,
+        `Laporan-Mitra-Limit-${tanggal}.xlsx`
+      );
     } catch (err) {
-      console.error('Gagal export excel:', err);
-      alert('Gagal mengekspor ke Excel. Pastikan package "xlsx" sudah terpasang (npm install xlsx).');
+      console.error(
+        'Gagal export excel:',
+        err
+      );
+
+      alert(
+        'Gagal mengekspor ke Excel. Pastikan package "xlsx" sudah terpasang (npm install xlsx).'
+      );
     }
   };
 
-  /* ============================================
-     CETAK PDF
-  ============================================ */
+  // =========================================================
+  // CETAK PDF
+  // =========================================================
+
   const handleCetakPDF = () => {
     if (filteredLaporan.length === 0) {
-      alert('Tidak ada data untuk dicetak.');
+      alert('Tidak ada data mitra yang mencapai limit untuk dicetak.');
       return;
     }
 
-    const doc = new jsPDF('landscape', 'mm', 'a4');
+    const doc = new jsPDF(
+      'landscape',
+      'mm',
+      'a4'
+    );
 
     doc.setFontSize(14);
-    doc.text('BADAN PUSAT STATISTIK KOTA MOJOKERTO', 14, 15);
+    doc.text(
+      'BADAN PUSAT STATISTIK KOTA MOJOKERTO',
+      14,
+      15
+    );
 
     doc.setFontSize(10);
-    doc.text('Laporan Pegawai Limit', 14, 21);
+    doc.text(
+      'Laporan Mitra/Pegawai Mencapai Limit',
+      14,
+      21
+    );
 
     doc.setFontSize(8);
-    doc.text(`Tanggal Cetak: ${new Date().toLocaleDateString('id-ID')}`, 14, 26);
+    doc.text(
+      `Tanggal Cetak: ${new Date().toLocaleDateString(
+        'id-ID'
+      )}`,
+      14,
+      26
+    );
 
     const filters: string[] = [];
-    if (kegiatanFilter !== 'Semua Kegiatan') filters.push(`Kegiatan ${kegiatanFilter}`);
-    if (bulanFilter !== 'Semua Bulan') filters.push(`Bulan ${bulanFilter}`);
-    if (statusFilter !== 'Semua') filters.push(`Status ${statusFilter}`);
-    doc.text(`Filter: ${filters.length > 0 ? filters.join(', ') : 'Semua Pegawai Terkena Limit'}`, 14, 31);
 
-    const tableBody = filteredLaporan.map((row, index) => [
-      index + 1,
-      row.namaPegawai,
-      row.nikNip,
-      row.namaKegiatan,
-      formatRupiah(row.terpakai),
-      formatRupiah(row.limit),
-      `${row.presentase}%`,
-      row.status,
-    ]);
+    if (
+      kegiatanFilter !== 'Semua Kegiatan'
+    ) {
+      filters.push(
+        `Kegiatan ${kegiatanFilter}`
+      );
+    }
+
+    if (bulanFilter !== 'Semua Bulan') {
+      filters.push(
+        `Bulan ${bulanFilter}`
+      );
+    }
+
+    if (statusFilter !== 'Semua') {
+      filters.push(
+        `Status ${statusFilter}`
+      );
+    }
+
+    doc.text(
+      `Filter: ${
+        filters.length > 0
+          ? filters.join(', ')
+          : 'Semua Mitra yang Mencapai Limit'
+      }`,
+      14,
+      31
+    );
+
+    const tableBody =
+      filteredLaporan.map(
+        (row, index) => [
+          index + 1,
+          row.namaPegawai,
+          row.nikNip,
+          row.namaKegiatan,
+          row.periode,
+
+          // Hak Honor Alokasi
+          formatRupiah(row.terpakai),
+
+          // Sisa Limit Periode
+          formatRupiah(row.limit),
+
+          `${row.presentase}%`,
+          row.status,
+        ]
+      );
 
     autoTable(doc, {
       startY: 36,
-      head: [['No', 'Nama Pegawai', 'NIK/NIP', 'Kegiatan', 'Terpakai', 'Limit', 'Presentase', 'Status']],
+
+      head: [
+        [
+          'No',
+          'Nama Mitra/Pegawai',
+          'SOBAT ID / NIK/NIP',
+          'Kegiatan',
+          'Periode',
+          'Hak Honor Alokasi',
+          'Sisa Limit Periode',
+          'Persentase',
+          'Status',
+        ],
+      ],
+
       body: tableBody,
+
       theme: 'grid',
-      headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontSize: 8, fontStyle: 'bold' },
-      bodyStyles: { fontSize: 8 },
+
+      headStyles: {
+        fillColor: [15, 23, 42],
+        textColor: [255, 255, 255],
+        fontSize: 8,
+        fontStyle: 'bold',
+      },
+
+      bodyStyles: {
+        fontSize: 8,
+      },
+
       columnStyles: {
-        0: { cellWidth: 10, halign: 'center' },
-        1: { cellWidth: 45 },
-        2: { cellWidth: 30 },
-        3: { cellWidth: 60 },
-        4: { cellWidth: 35, halign: 'right' },
-        5: { cellWidth: 35, halign: 'right' },
-        6: { cellWidth: 25, halign: 'center' },
-        7: { cellWidth: 25, halign: 'center' },
+        0: {
+          cellWidth: 10,
+          halign: 'center',
+        },
+        1: {
+          cellWidth: 42,
+        },
+        2: {
+          cellWidth: 32,
+        },
+        3: {
+          cellWidth: 55,
+        },
+        4: {
+          cellWidth: 22,
+        },
+        5: {
+          cellWidth: 35,
+          halign: 'right',
+        },
+        6: {
+          cellWidth: 35,
+          halign: 'right',
+        },
+        7: {
+          cellWidth: 22,
+          halign: 'center',
+        },
+        8: {
+          cellWidth: 30,
+          halign: 'center',
+        },
       },
     });
 
-    doc.save(`Laporan-Pegawai-Limit-${new Date().toISOString().slice(0, 10)}.pdf`);
+    doc.save(
+      `Laporan-Mitra-Limit-${new Date()
+        .toISOString()
+        .slice(0, 10)}.pdf`
+    );
   };
 
-  /* ============================================
-     RENDER
-  ============================================ */
+  // =========================================================
+  // RENDER
+  // =========================================================
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-800 font-sans">
-      <Sidebar mobileOpen={mobileSidebarOpen} onClose={() => setMobileSidebarOpen(false)} />
+      <Sidebar
+        mobileOpen={mobileSidebarOpen}
+        onClose={() =>
+          setMobileSidebarOpen(false)
+        }
+      />
 
       <div className="min-h-screen lg:pl-[230px]">
-        <Header onMenuClick={() => setMobileSidebarOpen(true)} />
+        <Header
+          onMenuClick={() =>
+            setMobileSidebarOpen(true)
+          }
+        />
 
         <main className="p-4 sm:p-6 lg:p-8">
           <div className="mx-auto max-w-[1400px]">
-            {/* JUDUL HALAMAN */}
+
+            {/* JUDUL */}
             <div className="mb-4 flex flex-wrap justify-between items-center gap-3">
               <div>
-                <h1 className="text-base font-bold text-slate-800">Laporan Pegawai Limit</h1>
+                <h1 className="text-base font-bold text-slate-800">
+                  Laporan Mitra/Pegawai Limit
+                </h1>
+
                 <p className="text-xs text-slate-500">
-                  Daftar pegawai/mitra yang sudah mendekati atau melebihi limit honor periode berjalan
+                  Menampilkan hanya mitra/pegawai yang telah mencapai atau melewati limit honor periode
                 </p>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
-                  onClick={handleExportExcel}
+                  onClick={
+                    handleExportExcel
+                  }
                   className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm transition"
                 >
-                  <span>📊</span> Export Excel
+                  <span>📊</span>
+                  Export Excel
                 </button>
+
                 <button
-                  onClick={handleCetakPDF}
+                  onClick={
+                    handleCetakPDF
+                  }
                   className="inline-flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold rounded-lg shadow-sm transition"
                 >
-                  <span>🖨️</span> Cetak PDF
+                  <span>🖨️</span>
+                  Cetak PDF
                 </button>
               </div>
             </div>
 
-            {/* FILTER (disamakan persis dengan halaman Penugasan) */}
+            {/* FILTER */}
             <div className="bg-white p-3 rounded-lg shadow-sm border border-slate-200 mb-4 flex flex-wrap gap-2.5 items-center justify-between">
               <div className="flex flex-wrap items-center gap-2 w-full">
+
                 {/* SEARCH */}
                 <div className="relative min-w-[260px]">
                   <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 pointer-events-none text-slate-400 text-xs">
                     🔍
                   </span>
+
                   <input
                     type="text"
-                    placeholder="Cari Pegawai, NIK/NIP, Kegiatan"
-                    value={searchKeyword}
+                    placeholder="Cari Mitra, SOBAT ID, Kegiatan"
+                    value={
+                      searchKeyword
+                    }
                     onChange={(e) => {
-                      setSearchKeyword(e.target.value);
+                      setSearchKeyword(
+                        e.target.value
+                      );
                       setCurrentPage(1);
                     }}
                     className="w-full pl-8 pr-2.5 py-1.5 text-xs border border-slate-200 rounded outline-none focus:border-blue-400"
                   />
                 </div>
 
-                {/* FILTER STATUS */}
+                {/* STATUS */}
                 <select
-                  value={statusFilter}
+                  value={
+                    statusFilter
+                  }
                   onChange={(e) => {
-                    setStatusFilter(e.target.value);
+                    setStatusFilter(
+                      e.target.value
+                    );
                     setCurrentPage(1);
                   }}
                   className="py-1.5 px-2 text-xs border border-slate-200 rounded bg-white text-slate-600 outline-none focus:border-blue-400 cursor-pointer"
                 >
-                  {STATUS_FILTER_OPTIONS.map((st) => (
-                    <option key={st} value={st}>
-                      {st}
-                    </option>
-                  ))}
+                  {STATUS_FILTER_OPTIONS.map(
+                    (st) => (
+                      <option
+                        key={st}
+                        value={st}
+                      >
+                        {st}
+                      </option>
+                    )
+                  )}
                 </select>
 
-                {/* FILTER KEGIATAN */}
+                {/* KEGIATAN */}
                 <select
-                  value={kegiatanFilter}
+                  value={
+                    kegiatanFilter
+                  }
                   onChange={(e) => {
-                    setKegiatanFilter(e.target.value);
+                    setKegiatanFilter(
+                      e.target.value
+                    );
                     setCurrentPage(1);
                   }}
                   className="py-1.5 px-2 text-xs border border-slate-200 rounded bg-white text-slate-600 outline-none focus:border-blue-400 cursor-pointer max-w-[240px]"
                 >
-                  <option value="Semua Kegiatan">Semua Kegiatan</option>
-                  {kegiatanOptions.map((k) => (
-                    <option key={k.id} value={k.nama_kegiatan}>
-                      {k.nama_kegiatan}
-                    </option>
-                  ))}
+                  <option value="Semua Kegiatan">
+                    Semua Kegiatan
+                  </option>
+
+                  {kegiatanOptions.map(
+                    (k) => (
+                      <option
+                        key={k.id}
+                        value={
+                          k.nama_kegiatan
+                        }
+                      >
+                        {k.nama_kegiatan}
+                      </option>
+                    )
+                  )}
                 </select>
 
-                {/* FILTER BULAN */}
+                {/* BULAN */}
                 <select
-                  value={bulanFilter}
+                  value={
+                    bulanFilter
+                  }
                   onChange={(e) => {
-                    setBulanFilter(e.target.value);
+                    setBulanFilter(
+                      e.target.value
+                    );
                     setCurrentPage(1);
                   }}
                   className="py-1.5 px-2 text-xs border border-slate-200 rounded bg-white text-slate-600 outline-none focus:border-blue-400 cursor-pointer"
                 >
-                  {BULAN_OPTIONS.map((bln) => (
-                    <option key={bln} value={bln}>
-                      {bln}
-                    </option>
-                  ))}
+                  {BULAN_OPTIONS.map(
+                    (bln) => (
+                      <option
+                        key={bln}
+                        value={bln}
+                      >
+                        {bln}
+                      </option>
+                    )
+                  )}
                 </select>
 
                 {/* CARI */}
@@ -613,9 +981,15 @@ export default function LaporanPegawaiLimitPage() {
                 <button
                   onClick={() => {
                     setSearchKeyword('');
-                    setStatusFilter('Semua');
-                    setKegiatanFilter('Semua Kegiatan');
-                    setBulanFilter('Semua Bulan');
+                    setStatusFilter(
+                      'Semua'
+                    );
+                    setKegiatanFilter(
+                      'Semua Kegiatan'
+                    );
+                    setBulanFilter(
+                      'Semua Bulan'
+                    );
                     setCurrentPage(1);
                   }}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium rounded transition cursor-pointer"
@@ -625,84 +999,217 @@ export default function LaporanPegawaiLimitPage() {
 
                 {/* JUMLAH BARIS */}
                 <div className="ml-auto flex items-center gap-2 text-[11px] text-slate-500">
-                  <span>Tampilkan:</span>
+                  <span>
+                    Tampilkan:
+                  </span>
+
                   <select
-                    value={itemsPerPage}
+                    value={
+                      itemsPerPage
+                    }
                     onChange={(e) => {
-                      setItemsPerPage(Number(e.target.value));
+                      setItemsPerPage(
+                        Number(
+                          e.target.value
+                        )
+                      );
                       setCurrentPage(1);
                     }}
                     className="py-1 px-2 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-400 cursor-pointer"
                   >
-                    <option value={5}>5</option>
-                    <option value={10}>10</option>
-                    <option value={25}>25</option>
-                    <option value={50}>50</option>
+                    <option value={5}>
+                      5
+                    </option>
+                    <option value={10}>
+                      10
+                    </option>
+                    <option value={25}>
+                      25
+                    </option>
+                    <option value={50}>
+                      50
+                    </option>
                   </select>
-                  <span>baris</span>
+
+                  <span>
+                    baris
+                  </span>
                 </div>
               </div>
             </div>
 
-            {/* TABEL */}
+            {/* INFO */}
+            {!loading &&
+              totalItems > 0 && (
+                <div className="mb-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-[11px] text-amber-700">
+                  Menampilkan{' '}
+                  <strong>
+                    {totalItems}
+                  </strong>{' '}
+                  data mitra/pegawai yang
+                  sudah mencapai atau
+                  melewati limit periode.
+                </div>
+              )}
+
+            {/* TABLE */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs text-slate-700">
                   <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
                     <tr>
-                      <th className="py-3 px-4 text-center w-12">No</th>
-                      <th className="py-3 px-4">Nama Pegawai</th>
-                      <th className="py-3 px-4">NIK/NIP</th>
-                      <th className="py-3 px-4">Kegiatan</th>
-                      <th className="py-3 px-4">Terpakai</th>
-                      <th className="py-3 px-4">Limit</th>
-                      <th className="py-3 px-4">Presentase</th>
-                      <th className="py-3 px-4">Status</th>
+                      <th className="py-3 px-4 text-center w-12">
+                        No
+                      </th>
+
+                      <th className="py-3 px-4">
+                        Nama Mitra/Pegawai
+                      </th>
+
+                      <th className="py-3 px-4">
+                        SOBAT ID / NIK/NIP
+                      </th>
+
+                      <th className="py-3 px-4">
+                        Kegiatan
+                      </th>
+
+                      <th className="py-3 px-4">
+                        Periode
+                      </th>
+
+                      <th className="py-3 px-4 text-right">
+                        Hak Honor Alokasi
+                      </th>
+
+                      <th className="py-3 px-4 text-right">
+                        Sisa Limit Periode
+                      </th>
+
+                      <th className="py-3 px-4 text-right">
+                        Persentase
+                      </th>
+
+                      <th className="py-3 px-4 text-center">
+                        Status
+                      </th>
                     </tr>
                   </thead>
+
                   <tbody className="divide-y divide-slate-100">
                     {loading ? (
                       <tr>
-                        <td colSpan={8} className="py-8 text-center text-slate-400">
-                          Memuat data laporan...
+                        <td
+                          colSpan={9}
+                          className="py-8 text-center text-slate-400"
+                        >
+                          Memuat data
+                          laporan...
                         </td>
                       </tr>
-                    ) : currentData.length === 0 ? (
+                    ) : currentData.length ===
+                      0 ? (
                       <tr>
-                        <td colSpan={8} className="py-8 text-center text-slate-400">
-                          Tidak ada pegawai yang mendekati/melebihi limit sesuai filter ini.
+                        <td
+                          colSpan={9}
+                          className="py-8 text-center text-slate-400"
+                        >
+                          Tidak ada mitra/pegawai
+                          yang mencapai limit
+                          sesuai filter.
                         </td>
                       </tr>
                     ) : (
-                      currentData.map((row, index) => (
-                        <tr
-                          key={row.id}
-                          className={`hover:bg-slate-50/60 transition ${
-                            row.status === 'Limit Terlampaui' ? 'bg-rose-50/40' : ''
-                          }`}
-                        >
-                          <td className="py-3.5 px-4 text-center font-medium text-slate-400">
-                            {(currentPage - 1) * itemsPerPage + index + 1}
-                          </td>
-                          <td className="py-3.5 px-4 font-semibold text-blue-600">{row.namaPegawai}</td>
-                          <td className="py-3.5 px-4 text-blue-500">{row.nikNip}</td>
-                          <td className="py-3.5 px-4 text-blue-500">
-                            <Link href={`/kegiatan/${row.kegiatanId}`} className="hover:underline">
-                              {row.namaKegiatan}
-                            </Link>
-                          </td>
-                          <td className="py-3.5 px-4 font-medium text-slate-700">
-                            {formatRupiah(row.terpakai)}
-                          </td>
-                          <td className="py-3.5 px-4 font-medium text-slate-700">
-                            {formatRupiah(row.limit)}
-                          </td>
-                          <td className={`py-3.5 px-4 font-semibold ${presentaseColor(row.status)}`}>
-                            {row.presentase}%
-                          </td>
-                          <td className="py-3.5 px-4">{statusBadge(row.status)}</td>
-                        </tr>
-                      ))
+                      currentData.map(
+                        (
+                          row,
+                          index
+                        ) => (
+                          <tr
+                            key={row.id}
+                            className={`hover:bg-slate-50/60 transition ${
+                              row.status ===
+                              'Limit Terlampaui'
+                                ? 'bg-rose-50/40'
+                                : 'bg-amber-50/20'
+                            }`}
+                          >
+                            <td className="py-3.5 px-4 text-center font-medium text-slate-400">
+                              {(currentPage -
+                                1) *
+                                itemsPerPage +
+                                index +
+                                1}
+                            </td>
+
+                            <td className="py-3.5 px-4 font-semibold text-blue-600">
+                              {
+                                row.namaPegawai
+                              }
+                            </td>
+
+                            <td className="py-3.5 px-4 text-blue-500 font-mono">
+                              {
+                                row.nikNip
+                              }
+                            </td>
+
+                            <td className="py-3.5 px-4 text-blue-500">
+                              <Link
+                                href={`/kegiatan/${row.kegiatanId}`}
+                                className="hover:underline"
+                              >
+                                {
+                                  row.namaKegiatan
+                                }
+                              </Link>
+                            </td>
+
+                            <td className="py-3.5 px-4 text-slate-600">
+                              {
+                                row.periode
+                              }
+                            </td>
+
+                            {/* HAK HONOR ALOKASI */}
+                            <td className="py-3.5 px-4 text-right font-semibold text-blue-600">
+                              {formatRupiah(
+                                row.terpakai
+                              )}
+                            </td>
+
+                            {/* SISA LIMIT PERIODE */}
+                            <td
+                              className={`py-3.5 px-4 text-right font-semibold ${
+                                row.limit <=
+                                0
+                                  ? 'text-rose-600'
+                                  : 'text-amber-600'
+                              }`}
+                            >
+                              {formatRupiah(
+                                row.limit
+                              )}
+                            </td>
+
+                            {/* PERSENTASE */}
+                            <td
+                              className={`py-3.5 px-4 text-right font-semibold ${presentaseColor(
+                                row.status
+                              )}`}
+                            >
+                              {row.presentase}
+                              %
+                            </td>
+
+                            <td className="py-3.5 px-4 text-center">
+                              {statusBadge(
+                                row.status
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      )
                     )}
                   </tbody>
                 </table>
@@ -712,48 +1219,118 @@ export default function LaporanPegawaiLimitPage() {
               {totalItems > 0 && (
                 <div className="px-6 py-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4 bg-white">
                   <div className="text-xs text-slate-500">
-                    Menampilkan <span className="font-semibold text-slate-700">{startItem}</span> -{' '}
-                    <span className="font-semibold text-slate-700">{endItem}</span> dari{' '}
-                    <span className="font-semibold text-slate-700">{totalItems}</span> data
+                    Menampilkan{' '}
+                    <span className="font-semibold text-slate-700">
+                      {startItem}
+                    </span>{' '}
+                    -{' '}
+                    <span className="font-semibold text-slate-700">
+                      {endItem}
+                    </span>{' '}
+                    dari{' '}
+                    <span className="font-semibold text-slate-700">
+                      {totalItems}
+                    </span>{' '}
+                    data
                   </div>
 
                   <div className="flex items-center gap-1.5 text-xs">
                     <button
-                      onClick={() => setCurrentPage((prev) => Math.max(prev - 1, 1))}
-                      disabled={currentPage === 1}
+                      onClick={() =>
+                        setCurrentPage(
+                          (prev) =>
+                            Math.max(
+                              prev - 1,
+                              1
+                            )
+                        )
+                      }
+                      disabled={
+                        currentPage === 1
+                      }
                       className="px-2.5 py-1 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                     >
                       ‹
                     </button>
 
-                    {Array.from({ length: totalPages }, (_, i) => i + 1)
+                    {Array.from(
+                      {
+                        length: totalPages,
+                      },
+                      (_, i) => i + 1
+                    )
                       .filter(
-                        (page) => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1
+                        (page) =>
+                          page === 1 ||
+                          page ===
+                            totalPages ||
+                          Math.abs(
+                            page -
+                              currentPage
+                          ) <= 1
                       )
-                      .map((page, idx, array) => {
-                        const prevPage = array[idx - 1];
-                        const showEllipsis = prevPage && page - prevPage > 1;
+                      .map(
+                        (
+                          page,
+                          idx,
+                          array
+                        ) => {
+                          const prevPage =
+                            array[
+                              idx - 1
+                            ];
 
-                        return (
-                          <React.Fragment key={page}>
-                            {showEllipsis && <span className="px-1 text-slate-400">...</span>}
-                            <button
-                              onClick={() => setCurrentPage(page)}
-                              className={`px-3 py-1 rounded font-medium transition ${
-                                currentPage === page
-                                  ? 'bg-blue-600 text-white border border-blue-600'
-                                  : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
-                              }`}
+                          const showEllipsis =
+                            prevPage &&
+                            page -
+                              prevPage >
+                              1;
+
+                          return (
+                            <React.Fragment
+                              key={page}
                             >
-                              {page}
-                            </button>
-                          </React.Fragment>
-                        );
-                      })}
+                              {showEllipsis && (
+                                <span className="px-1 text-slate-400">
+                                  ...
+                                </span>
+                              )}
+
+                              <button
+                                onClick={() =>
+                                  setCurrentPage(
+                                    page
+                                  )
+                                }
+                                className={`px-3 py-1 rounded font-medium transition ${
+                                  currentPage ===
+                                  page
+                                    ? 'bg-blue-600 text-white border border-blue-600'
+                                    : 'border border-slate-200 text-slate-600 hover:bg-slate-50'
+                                }`}
+                              >
+                                {page}
+                              </button>
+                            </React.Fragment>
+                          );
+                        }
+                      )}
 
                     <button
-                      onClick={() => setCurrentPage((prev) => Math.min(prev + 1, totalPages))}
-                      disabled={currentPage === totalPages || totalPages === 0}
+                      onClick={() =>
+                        setCurrentPage(
+                          (prev) =>
+                            Math.min(
+                              prev + 1,
+                              totalPages
+                            )
+                        )
+                      }
+                      disabled={
+                        currentPage ===
+                          totalPages ||
+                        totalPages === 0
+                      }
                       className="px-2.5 py-1 rounded border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                     >
                       ›
