@@ -118,6 +118,10 @@ export default function MitraPage() {
 
   const [isBulkStatusSubmitting, setIsBulkStatusSubmitting] =
     useState<boolean>(false);
+  const [selectedBulanMulai, setSelectedBulanMulai] = useState('Januari');
+  const [selectedTahunMulai, setSelectedTahunMulai] = useState('2026');
+  const [selectedBulanSelesai, setSelectedBulanSelesai] = useState('Januari');
+  const [selectedTahunSelesai, setSelectedTahunSelesai] = useState('2026');
 
   // ============================================================
   // FETCH DATA MITRA
@@ -175,7 +179,18 @@ export default function MitraPage() {
       // Reset seleksi setiap data dimuat ulang
       setSelectedIds([]);
     } catch (err: any) {
-      console.error('Error fetching mitra:', err);
+      console.error(
+        'Error fetching mitra:',
+        err
+      );
+
+      alert(
+        'Gagal memuat data mitra: ' +
+          (err?.message ||
+            err?.details ||
+            err?.hint ||
+            'Terjadi kesalahan')
+      );
     } finally {
       setLoading(false);
     }
@@ -610,14 +625,55 @@ export default function MitraPage() {
             .trim()
             .toUpperCase();
 
+        // ====================================================
+        // PERIODE KEGIATAN (RENTANG BULAN)
+        // ====================================================
+        const bulanMulaiIndex =
+          BULAN_OPTIONS.indexOf(
+            selectedBulanMulai
+          );
+
+        const bulanSelesaiIndex =
+          BULAN_OPTIONS.indexOf(
+            selectedBulanSelesai
+          );
+
+        if (
+          bulanMulaiIndex === -1 ||
+          bulanSelesaiIndex === -1
+        ) {
+          throw new Error(
+            'Bulan periode kegiatan tidak valid.'
+          );
+        }
+
+        const periodeMulaiValue =
+          Number(selectedTahunMulai) * 12 +
+          bulanMulaiIndex;
+
+        const periodeSelesaiValue =
+          Number(selectedTahunSelesai) * 12 +
+          bulanSelesaiIndex;
+
+        if (
+          periodeMulaiValue >
+          periodeSelesaiValue
+        ) {
+          throw new Error(
+            'Periode mulai tidak boleh lebih besar dari periode selesai.'
+          );
+        }
+
         const bulanKegiatanDisisipkan =
-          `${selectedBulan} ${selectedTahun}`;
+          `${selectedBulanMulai} ${selectedTahunMulai} - ${selectedBulanSelesai} ${selectedTahunSelesai}`;
 
         let kegiatanId: number | null = null;
 
-        // Cek kegiatan yang sudah ada
+        // Cek kegiatan yang sudah ada berdasarkan
+        // nama kegiatan + rentang periode
         const {
           data: existingKegiatan,
+          error: errCheckKegiatan,
         } = await supabase
           .from('kegiatan')
           .select('id')
@@ -631,16 +687,27 @@ export default function MitraPage() {
           )
           .maybeSingle();
 
+        if (errCheckKegiatan) {
+          throw errCheckKegiatan;
+        }
+
         if (existingKegiatan) {
           kegiatanId = existingKegiatan.id;
         } else {
           // Ambil jumlah kegiatan
-          const { count } = await supabase
+          const {
+            count,
+            error: errCount,
+          } = await supabase
             .from('kegiatan')
             .select('*', {
               count: 'exact',
               head: true,
             });
+
+          if (errCount) {
+            throw errCount;
+          }
 
           const nextNumber =
             (count || 0) + 1;
@@ -670,6 +737,12 @@ export default function MitraPage() {
 
           if (errKeg) {
             throw errKeg;
+          }
+
+          if (!newKegiatan) {
+            throw new Error(
+              'Kegiatan berhasil dibuat tetapi ID kegiatan tidak ditemukan.'
+            );
           }
 
           kegiatanId = newKegiatan.id;
@@ -712,10 +785,25 @@ export default function MitraPage() {
 
         await fetchMitra();
       } catch (err: unknown) {
-        const errorMessage =
-          err instanceof Error
-            ? err.message
-            : 'Terjadi kesalahan';
+        let errorMessage =
+          'Terjadi kesalahan';
+
+        if (err instanceof Error) {
+          errorMessage = err.message;
+        } else if (
+          typeof err === 'object' &&
+          err !== null
+        ) {
+          const e = err as any;
+          errorMessage =
+            e.message ||
+            e.details ||
+            e.hint ||
+            e.code ||
+            JSON.stringify(e);
+        } else if (err != null) {
+          errorMessage = String(err);
+        }
 
         console.error(
           'Error processing Excel:',
@@ -1576,7 +1664,7 @@ export default function MitraPage() {
         </main>
       </div>
 
-      {/* ========================================================
+     {/* ========================================================
           MODAL UNGGAH EXCEL
       ======================================================== */}
 
@@ -1588,14 +1676,12 @@ export default function MitraPage() {
             <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
 
               <h3 className="font-bold text-sm text-slate-800">
-                Unggah Data Excel SOBAT
+                Unggah Data Excel SOBAT (Multi-Bulan)
               </h3>
 
               <button
                 onClick={() => {
-                  setIsUploadModalOpen(
-                    false
-                  );
+                  setIsUploadModalOpen(false);
                   setSelectedFile(null);
                 }}
                 className="text-slate-400 hover:text-slate-600 text-base"
@@ -1617,70 +1703,88 @@ export default function MitraPage() {
                   accept=".xlsx, .xls"
                   onChange={(e) =>
                     setSelectedFile(
-                      e.target.files?.[0] ||
-                        null
+                      e.target.files?.[0] || null
                     )
                   }
                   className="w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              {/* PERIODE KEGIATAN (RENTANG BULAN) */}
+              <div className="space-y-2">
+                <label className="block font-medium text-slate-700">
+                  Periode Kegiatan (Rentang Bulan):
+                </label>
 
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Bulan Kegiatan
-                  </label>
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Mulai */}
+                  <div>
+                    <span className="block text-[10px] text-slate-500 mb-1">Mulai Bulan & Tahun</span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        value={selectedBulanMulai}
+                        onChange={(e) =>
+                          setSelectedBulanMulai(e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
+                      >
+                        {BULAN_OPTIONS.map((bln) => (
+                          <option key={bln} value={bln}>
+                            {bln}
+                          </option>
+                        ))}
+                      </select>
 
-                  <select
-                    value={selectedBulan}
-                    onChange={(e) =>
-                      setSelectedBulan(
-                        e.target.value
-                      )
-                    }
-                    className="w-full px-3 py-2 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
-                  >
-                    {BULAN_OPTIONS.map(
-                      (bln) => (
-                        <option
-                          key={bln}
-                          value={bln}
-                        >
-                          {bln}
-                        </option>
-                      )
-                    )}
-                  </select>
+                      <select
+                        value={selectedTahunMulai}
+                        onChange={(e) =>
+                          setSelectedTahunMulai(e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
+                      >
+                        {TAHUN_OPTIONS.map((thn) => (
+                          <option key={thn} value={thn}>
+                            {thn}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Sampai */}
+                  <div>
+                    <span className="block text-[10px] text-slate-500 mb-1">Sampai Bulan & Tahun</span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        value={selectedBulanSelesai}
+                        onChange={(e) =>
+                          setSelectedBulanSelesai(e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
+                      >
+                        {BULAN_OPTIONS.map((bln) => (
+                          <option key={bln} value={bln}>
+                            {bln}
+                          </option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={selectedTahunSelesai}
+                        onChange={(e) =>
+                          setSelectedTahunSelesai(e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
+                      >
+                        {TAHUN_OPTIONS.map((thn) => (
+                          <option key={thn} value={thn}>
+                            {thn}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
                 </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Tahun Kegiatan
-                  </label>
-
-                  <select
-                    value={selectedTahun}
-                    onChange={(e) =>
-                      setSelectedTahun(
-                        e.target.value
-                      )
-                    }
-                    className="w-full px-3 py-2 border border-slate-200 rounded bg-white text-slate-700 outline-none focus:border-blue-500"
-                  >
-                    {TAHUN_OPTIONS.map(
-                      (thn) => (
-                        <option
-                          key={thn}
-                          value={thn}
-                        >
-                          {thn}
-                        </option>
-                      )
-                    )}
-                  </select>
-                </div>
-
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
@@ -1688,9 +1792,7 @@ export default function MitraPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setIsUploadModalOpen(
-                      false
-                    );
+                    setIsUploadModalOpen(false);
                     setSelectedFile(null);
                   }}
                   className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded font-medium transition"
@@ -1700,18 +1802,11 @@ export default function MitraPage() {
 
                 <button
                   type="button"
-                  onClick={
-                    handleProcessExcel
-                  }
-                  disabled={
-                    isUploading ||
-                    !selectedFile
-                  }
+                  onClick={handleProcessExcel}
+                  disabled={isUploading || !selectedFile}
                   className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded font-medium transition flex items-center gap-1.5"
                 >
-                  {isUploading
-                    ? 'Proses Impor...'
-                    : 'Unggah & Impor'}
+                  {isUploading ? 'Proses Impor...' : 'Unggah & Impor'}
                 </button>
 
               </div>

@@ -129,8 +129,154 @@ const BULAN_OPTIONS = [
   'Desember',
 ];
 
+// Fallback murni jaga-jaga bila BENAR-BENAR belum ada baris limit_honor untuk
+// periode terkait. Nilai aktual selalu diambil dari database (lihat getLimitForPeriode).
 const DEFAULT_LIMIT = 3000000;
 const DEFAULT_WARN_PERCENT = 80;
+
+// Pemetaan angka bulan -> nama bulan (Indonesia), dipakai untuk mencocokkan
+// format "YYYY-MM" (mis. dari limit_honor.bulan_periode) dengan teks bebas
+// (mis. kegiatan.bulan_kegiatan = "Agustus" atau "Agustus 2026").
+// Sinkron dengan logika yang sama persis di halaman Monitoring Limit.
+const BULAN_MAP: Record<string, string> = {
+  '01': 'januari',
+  '02': 'februari',
+  '03': 'maret',
+  '04': 'april',
+  '05': 'mei',
+  '06': 'juni',
+  '07': 'juli',
+  '08': 'agustus',
+  '09': 'september',
+  '10': 'oktober',
+  '11': 'november',
+  '12': 'desember',
+};
+
+/**
+ * Mencocokkan sebuah teks periode bebas (rawDbValue, mis. "Agustus 2026")
+ * dengan format filter "YYYY-MM" (filterYYYYMM, mis. "2026-08").
+ * Fungsi ini identik dengan isMatchingMonth pada MonitoringLimitPage
+ * supaya limit per-periode konsisten di seluruh aplikasi.
+ */
+const isMatchingMonth = (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
+  if (!rawDbValue) return false;
+  if (!filterYYYYMM) return true;
+
+  const val = String(rawDbValue).trim().toLowerCase();
+  const [year, monthNum] = filterYYYYMM.split('-');
+  const monthName = BULAN_MAP[monthNum] || '';
+
+  const hasMonth = val.includes(monthName);
+  const hasYear = val.includes(year);
+
+  if (hasMonth && hasYear) return true;
+  if (val.includes(filterYYYYMM) || val.startsWith(filterYYYYMM)) return true;
+  if (hasMonth && !val.match(/\d{4}/)) return true;
+
+  return false;
+};
+
+// =========================================================
+// PARSER PERIODE KEGIATAN MULTI-BULAN
+// =========================================================
+// Format yang didukung dari kolom kegiatan.bulan_kegiatan (varchar):
+//   1) Rentang       : "Agustus 2026 - Oktober 2026"
+//   2) Bulan tunggal : "Agustus 2026 (1 Bulan)"  (angka bisa >1 juga)
+// Keduanya diurai menjadi daftar bulan individual supaya honor dapat
+// dibagi rata per bulan untuk keperluan pengecekan limit bulanan.
+
+interface PeriodeKegiatan {
+  months: string[]; // mis. ["Agustus 2026", "September 2026", "Oktober 2026"]
+  jumlahBulan: number;
+  label: string; // teks asli, untuk ditampilkan apa adanya
+}
+
+const monthIndexFromName = (name: string): number =>
+  NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
+
+const generateMonthSequence = (startMonthIdx: number, startYear: number, count: number): string[] => {
+  const result: string[] = [];
+  let idx = startMonthIdx;
+  let year = startYear;
+  for (let i = 0; i < count; i++) {
+    result.push(`${NAMA_BULAN_ID[idx]} ${year}`);
+    idx++;
+    if (idx > 11) {
+      idx = 0;
+      year++;
+    }
+  }
+  return result;
+};
+
+const RANGE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*-\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})$/;
+const SINGLE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*\((\d+)\s*Bulan\)$/i;
+
+const parseBulanKegiatan = (raw: string | null | undefined): PeriodeKegiatan => {
+  const text = (raw || '').trim();
+  if (!text) return { months: [], jumlahBulan: 0, label: '-' };
+
+  // Format 1: rentang "Agustus 2026 - Oktober 2026"
+  const rangeMatch = text.match(RANGE_REGEX);
+  if (rangeMatch) {
+    const [, startName, startYearStr, endName, endYearStr] = rangeMatch;
+    const startIdx = monthIndexFromName(startName);
+    const endIdx = monthIndexFromName(endName);
+    const startYear = parseInt(startYearStr, 10);
+    const endYear = parseInt(endYearStr, 10);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+      const totalBulan = (endYear - startYear) * 12 + (endIdx - startIdx) + 1;
+      if (totalBulan > 0 && totalBulan <= 36) {
+        return {
+          months: generateMonthSequence(startIdx, startYear, totalBulan),
+          jumlahBulan: totalBulan,
+          label: text,
+        };
+      }
+    }
+  }
+
+  // Format 2: bulan tunggal + keterangan durasi "Agustus 2026 (1 Bulan)"
+  const singleMatch = text.match(SINGLE_REGEX);
+  if (singleMatch) {
+    const [, monthName, yearStr, jumlahStr] = singleMatch;
+    const startIdx = monthIndexFromName(monthName);
+    const jumlah = Math.max(parseInt(jumlahStr, 10) || 1, 1);
+
+    if (startIdx !== -1) {
+      return {
+        months: generateMonthSequence(startIdx, parseInt(yearStr, 10), jumlah),
+        jumlahBulan: jumlah,
+        label: text,
+      };
+    }
+  }
+
+  // Fallback: kalau format tidak dikenali, anggap 1 bulan apa adanya
+  // (supaya tidak error, tapi tetap tervalidasi/terhitung sebagai 1 periode)
+  return { months: [text], jumlahBulan: 1, label: text };
+};
+
+// =========================================================
+// GROUP PENUGASAN PER MITRA
+// =========================================================
+// Satu mitra bisa mengikuti banyak kegiatan sekaligus. Supaya tidak
+// "terpencar" (nama mitra berulang di banyak baris), penugasan dikelompokkan
+// per sobat_id: satu kartu = satu mitra, berisi ringkasan total + daftar
+// seluruh kegiatan yang ia ikuti (bisa dibuka/tutup / expand-collapse).
+
+interface MitraGroup {
+  sobat_id: string;
+  mitra?: PenugasanData['mitra'];
+  items: PenugasanData[];
+  totalAlokasi: number;
+  totalDicairkan: number;
+  totalSisaHonor: number;
+  worstUsageRatio: number;
+  worstWarnPercent: number;
+}
 
 // =========================================================
 // PAGE
@@ -142,7 +288,9 @@ export default function PenugasanPage() {
   const [penugasanList, setPenugasanList] = useState<PenugasanData[]>([]);
   const [mitraOptions, setMitraOptions] = useState<MitraOption[]>([]);
   const [kegiatanOptions, setKegiatanOptions] = useState<KegiatanOption[]>([]);
-  const [limitByPeriode, setLimitByPeriode] = useState<Record<string, LimitHonor>>({});
+  // Disimpan sebagai array (bukan Record dengan exact-key) supaya bisa
+  // dicocokkan secara fleksibel via isMatchingMonth, sama seperti Monitoring Limit.
+  const [limitList, setLimitList] = useState<LimitHonor[]>([]);
 
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -153,6 +301,10 @@ export default function PenugasanPage() {
 
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [itemsPerPage, setItemsPerPage] = useState<number>(10);
+
+  // Kartu mitra mana saja yang sedang dibuka (expanded). Disimpan sebagai
+  // Set berisi sobat_id.
+  const [expandedMitraIds, setExpandedMitraIds] = useState<Set<string>>(new Set());
 
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
@@ -217,11 +369,9 @@ export default function PenugasanPage() {
       if (errLimit) {
         console.error('Error fetching limit_honor:', errLimit.message);
       } else if (resLimit) {
-        const map: Record<string, LimitHonor> = {};
-        resLimit.forEach((row: LimitHonor) => {
-          map[row.bulan_periode] = row;
-        });
-        setLimitByPeriode(map);
+        // Simpan apa adanya sebagai array — pencocokan periode dilakukan
+        // secara fleksibel di getLimitForPeriode, bukan exact-key lookup.
+        setLimitList(resLimit);
       }
     } catch (error) {
       console.error('Error fetching dropdown data:', error);
@@ -288,23 +438,34 @@ export default function PenugasanPage() {
     fetchPenugasan();
   }, [fetchPenugasan]);
 
+  // Mengambil limit & persen peringatan untuk sebuah periode kegiatan
+  // (mis. "Agustus 2026") dengan mencocokkan secara fleksibel ke baris
+  // limit_honor yang paling sesuai. Nilai DEFAULT_LIMIT hanya dipakai kalau
+  // memang tidak ada baris limit_honor yang cocok untuk periode tsb.
   const getLimitForPeriode = useCallback(
     (periode: string) => {
-      const info = limitByPeriode[periode];
+      const info = limitList.find((row) => isMatchingMonth(periode, row.bulan_periode));
       return {
         maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
         warnPercent: info?.persen_peringatan ?? DEFAULT_WARN_PERCENT,
       };
     },
-    [limitByPeriode]
+    [limitList]
   );
 
+  // Honor tiap kegiatan dibagi RATA ke setiap bulan yang dicakupnya.
+  // Contoh: kegiatan 3 bulan dengan hak honor 900.000 -> 300.000 disumbangkan
+  // ke akumulasi limit tiap-tiap dari 3 bulan tersebut (bukan 900.000 penuh di 1 bulan).
   const accumulatedHonorBySobatPeriode = useMemo(() => {
     const map: Record<string, number> = {};
     penugasanList.forEach((item) => {
-      const periode = item.kegiatan?.bulan_kegiatan || '';
-      const key = `${item.sobat_id}__${periode}`;
-      map[key] = (map[key] || 0) + (Number(item.total_honor) || 0);
+      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      if (months.length === 0) return;
+      const honorPerBulan = (Number(item.total_honor) || 0) / jumlahBulan;
+      months.forEach((bulan) => {
+        const key = `${item.sobat_id}__${bulan}`;
+        map[key] = (map[key] || 0) + honorPerBulan;
+      });
     });
     return map;
   }, [penugasanList]);
@@ -312,47 +473,57 @@ export default function PenugasanPage() {
   const accumulatedDicairkanBySobatPeriode = useMemo(() => {
     const map: Record<string, number> = {};
     penugasanList.forEach((item) => {
-      const periode = item.kegiatan?.bulan_kegiatan || '';
-      const key = `${item.sobat_id}__${periode}`;
-      map[key] = (map[key] || 0) + (Number(item.jumlah_dicairkan) || 0);
+      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      if (months.length === 0) return;
+      const dicairkanPerBulan = (Number(item.jumlah_dicairkan) || 0) / jumlahBulan;
+      months.forEach((bulan) => {
+        const key = `${item.sobat_id}__${bulan}`;
+        map[key] = (map[key] || 0) + dicairkanPerBulan;
+      });
     });
     return map;
   }, [penugasanList]);
 
-  const currentFormPeriode = useMemo(() => {
+  const currentFormPeriodeInfo = useMemo(() => {
     const kegiatan = kegiatanOptions.find((k) => k.id === formData.kegiatan_id);
-    return kegiatan?.bulan_kegiatan || kegiatanOptions[0]?.bulan_kegiatan || '';
+    const raw = kegiatan?.bulan_kegiatan || kegiatanOptions[0]?.bulan_kegiatan || '';
+    return parseBulanKegiatan(raw);
   }, [formData.kegiatan_id, kegiatanOptions]);
 
-  // Cek mitra SUDAH limit dari penugasan LAIN (tanpa memperhitungkan honor baru yang sedang diisi)
+  // Cek mitra SUDAH limit dari penugasan LAIN (tanpa memperhitungkan honor baru yang sedang diisi).
+  // Sekarang mengecek SETIAP bulan yang dicakup kegiatan (periodeInfo.months), bukan cuma satu
+  // periode tunggal, karena satu kegiatan bisa membentang beberapa bulan.
   const checkMitraAlreadyAtLimit = useCallback(
-    (sobatId: string, periode: string, excludePenugasanId?: number): LimitBlockedInfo | null => {
-      if (!sobatId || !periode) return null;
+    (sobatId: string, periodeInfo: PeriodeKegiatan, excludePenugasanId?: number): LimitBlockedInfo | null => {
+      if (!sobatId || periodeInfo.months.length === 0) return null;
 
-      const { maxLimit } = getLimitForPeriode(periode);
+      for (const bulan of periodeInfo.months) {
+        const { maxLimit } = getLimitForPeriode(bulan);
 
-      let existingTotal = 0;
-      let existingDicairkan = 0;
-      penugasanList.forEach((item) => {
-        if (item.sobat_id !== sobatId) return;
-        if ((item.kegiatan?.bulan_kegiatan || '') !== periode) return;
-        if (excludePenugasanId && item.id === excludePenugasanId) return;
-        existingTotal += Number(item.total_honor) || 0;
-        existingDicairkan += Number(item.jumlah_dicairkan) || 0;
-      });
+        let existingTotal = 0;
+        let existingDicairkan = 0;
+        penugasanList.forEach((item) => {
+          if (item.sobat_id !== sobatId) return;
+          if (excludePenugasanId && item.id === excludePenugasanId) return;
+          const itemPeriode = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+          if (!itemPeriode.months.includes(bulan)) return;
+          existingTotal += (Number(item.total_honor) || 0) / itemPeriode.jumlahBulan;
+          existingDicairkan += (Number(item.jumlah_dicairkan) || 0) / itemPeriode.jumlahBulan;
+        });
 
-      if (existingTotal >= maxLimit) {
-        const mitraInfo = mitraOptions.find((m) => m.sobat_id === sobatId);
-        return {
-          namaMitra: mitraInfo?.nama_mitra || sobatId,
-          periode,
-          limitBulanan: maxLimit,
-          hakHonorAlokasi: existingTotal,
-          sudahDicairkan: existingDicairkan,
-          sisaLimit: Math.max(maxLimit - existingTotal, 0),
-          persenTerpakai: Math.round((existingTotal / maxLimit) * 100),
-          sebab: 'sudah_limit',
-        };
+        if (existingTotal >= maxLimit) {
+          const mitraInfo = mitraOptions.find((m) => m.sobat_id === sobatId);
+          return {
+            namaMitra: mitraInfo?.nama_mitra || sobatId,
+            periode: bulan,
+            limitBulanan: maxLimit,
+            hakHonorAlokasi: existingTotal,
+            sudahDicairkan: existingDicairkan,
+            sisaLimit: Math.max(maxLimit - existingTotal, 0),
+            persenTerpakai: Math.round((existingTotal / maxLimit) * 100),
+            sebab: 'sudah_limit',
+          };
+        }
       }
 
       return null;
@@ -386,7 +557,7 @@ export default function PenugasanPage() {
   );
 
   const handleSelectMitraInForm = (sobatId: string) => {
-    const blockedLimit = checkMitraAlreadyAtLimit(sobatId, currentFormPeriode, isEditMode ? formData.id : undefined);
+    const blockedLimit = checkMitraAlreadyAtLimit(sobatId, currentFormPeriodeInfo, isEditMode ? formData.id : undefined);
     if (blockedLimit) {
       setLimitBlockedInfo(blockedLimit);
       setIsLimitBlockedModalOpen(true);
@@ -405,10 +576,10 @@ export default function PenugasanPage() {
 
   const handleSelectKegiatanInForm = (kegiatanId: number) => {
     const kegiatanTerpilih = kegiatanOptions.find((k) => k.id === kegiatanId);
-    const periodeBaru = kegiatanTerpilih?.bulan_kegiatan || '';
+    const periodeInfoBaru = parseBulanKegiatan(kegiatanTerpilih?.bulan_kegiatan);
 
     if (formData.sobat_id) {
-      const blockedLimit = checkMitraAlreadyAtLimit(formData.sobat_id, periodeBaru, isEditMode ? formData.id : undefined);
+      const blockedLimit = checkMitraAlreadyAtLimit(formData.sobat_id, periodeInfoBaru, isEditMode ? formData.id : undefined);
       if (blockedLimit) {
         setLimitBlockedInfo(blockedLimit);
         setIsLimitBlockedModalOpen(true);
@@ -426,47 +597,209 @@ export default function PenugasanPage() {
     setFormData((prev) => ({ ...prev, kegiatan_id: kegiatanId }));
   };
 
-  // Proyeksi total SETELAH honor yang sedang diisi ditambahkan
+  // Rincian proyeksi PER BULAN setelah honor yang sedang diisi ditambahkan.
+  // Karena kegiatan bisa membentang beberapa bulan, honor dibagi rata
+  // (formData.total_honor / jumlahBulan) dan diproyeksikan ke SETIAP bulan
+  // yang dicakup kegiatan tsb — masing-masing dibandingkan ke limit bulan itu sendiri.
+  interface BulanProyeksi {
+    bulan: string;
+    currentTotal: number;
+    newTotal: number;
+    maxLimit: number;
+    warnPercent: number;
+    isExceeded: boolean;
+    isWarning: boolean;
+    usagePercent: number;
+  }
+
   const formLimitCheck = useMemo(() => {
-    if (!formData.sobat_id || !currentFormPeriode) {
-      return { currentTotal: 0, newTotal: 0, isExceeded: false, isWarning: false, maxLimit: DEFAULT_LIMIT, usagePercent: 0 };
+    const periodeInfo = currentFormPeriodeInfo;
+
+    if (!formData.sobat_id || periodeInfo.months.length === 0) {
+      return {
+        maxLimit: DEFAULT_LIMIT,
+        isExceeded: false,
+        isWarning: false,
+        honorPerBulan: 0,
+        perBulan: [] as BulanProyeksi[],
+        worst: null as BulanProyeksi | null,
+      };
     }
 
-    const { maxLimit, warnPercent } = getLimitForPeriode(currentFormPeriode);
+    const honorPerBulan = (Number(formData.total_honor) || 0) / periodeInfo.jumlahBulan;
 
-    let currentTotal = 0;
-    penugasanList.forEach((item) => {
-      if (item.sobat_id !== formData.sobat_id) return;
-      if ((item.kegiatan?.bulan_kegiatan || '') !== currentFormPeriode) return;
-      if (isEditMode && item.id === formData.id) return;
-      currentTotal += Number(item.total_honor) || 0;
+    const perBulan: BulanProyeksi[] = periodeInfo.months.map((bulan) => {
+      const { maxLimit, warnPercent } = getLimitForPeriode(bulan);
+
+      let currentTotal = 0;
+      penugasanList.forEach((item) => {
+        if (item.sobat_id !== formData.sobat_id) return;
+        if (isEditMode && item.id === formData.id) return;
+        const itemPeriode = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+        if (!itemPeriode.months.includes(bulan)) return;
+        currentTotal += (Number(item.total_honor) || 0) / itemPeriode.jumlahBulan;
+      });
+
+      const newTotal = currentTotal + honorPerBulan;
+      const usagePercent = maxLimit > 0 ? (newTotal / maxLimit) * 100 : 0;
+
+      return {
+        bulan,
+        currentTotal,
+        newTotal,
+        maxLimit,
+        warnPercent,
+        isExceeded: newTotal > maxLimit,
+        isWarning: usagePercent >= warnPercent && newTotal <= maxLimit,
+        usagePercent,
+      };
     });
 
-    const newTotal = currentTotal + (Number(formData.total_honor) || 0);
-    const usagePercent = maxLimit > 0 ? (newTotal / maxLimit) * 100 : 0;
+    const isExceeded = perBulan.some((b) => b.isExceeded);
+    const isWarning = !isExceeded && perBulan.some((b) => b.isWarning);
+    const worst = perBulan.reduce<BulanProyeksi | null>(
+      (acc, b) => (!acc || b.usagePercent > acc.usagePercent ? b : acc),
+      null
+    );
 
     return {
-      maxLimit,
-      currentTotal,
-      newTotal,
-      isExceeded: newTotal > maxLimit,
-      isWarning: usagePercent >= warnPercent && newTotal <= maxLimit,
-      usagePercent,
+      maxLimit: worst?.maxLimit ?? DEFAULT_LIMIT,
+      isExceeded,
+      isWarning,
+      honorPerBulan,
+      perBulan,
+      worst,
     };
-  }, [formData.sobat_id, formData.total_honor, formData.id, isEditMode, penugasanList, currentFormPeriode, getLimitForPeriode]);
+  }, [
+    formData.sobat_id,
+    formData.total_honor,
+    formData.id,
+    formData.kegiatan_id,
+    isEditMode,
+    penugasanList,
+    currentFormPeriodeInfo,
+    getLimitForPeriode,
+  ]);
 
-  const totalItems = penugasanList.length;
-  const totalPages = Math.ceil(totalItems / itemsPerPage) || 1;
+  // Untuk satu baris penugasan (yang kegiatannya bisa membentang beberapa bulan),
+  // ambil status/sisa-limit dari bulan yang PALING TERPAKAI (worst case) di antara
+  // semua bulan yang dicakup kegiatan tsb. Ini yang ditampilkan di kolom tabel.
+  const getRowLimitSummary = useCallback(
+    (item: PenugasanData) => {
+      const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      if (periodeInfo.months.length === 0) {
+        return {
+          label: '-',
+          jumlahBulan: 0,
+          honorPerBulan: 0,
+          worstUsageRatio: 0,
+          worstWarnPercent: DEFAULT_WARN_PERCENT,
+          sisaLimitMin: 0,
+        };
+      }
 
-  const currentData = useMemo(() => {
+      const honorPerBulan = (Number(item.total_honor) || 0) / periodeInfo.jumlahBulan;
+
+      let worstUsageRatio = 0;
+      let worstWarnPercent = DEFAULT_WARN_PERCENT;
+      let sisaLimitMin = Infinity;
+
+      periodeInfo.months.forEach((bulan) => {
+        const { maxLimit, warnPercent } = getLimitForPeriode(bulan);
+        const totalAllocated = accumulatedHonorBySobatPeriode[`${item.sobat_id}__${bulan}`] || 0;
+        const usageRatio = maxLimit > 0 ? (totalAllocated / maxLimit) * 100 : 0;
+        const sisa = maxLimit - totalAllocated;
+
+        if (usageRatio > worstUsageRatio) {
+          worstUsageRatio = usageRatio;
+          worstWarnPercent = warnPercent;
+        }
+        if (sisa < sisaLimitMin) sisaLimitMin = sisa;
+      });
+
+      return {
+        label: periodeInfo.label,
+        jumlahBulan: periodeInfo.jumlahBulan,
+        honorPerBulan,
+        worstUsageRatio,
+        worstWarnPercent,
+        sisaLimitMin: sisaLimitMin === Infinity ? 0 : sisaLimitMin,
+      };
+    },
+    [accumulatedHonorBySobatPeriode, getLimitForPeriode]
+  );
+
+  // =========================================================
+  // GROUPING PENUGASAN PER MITRA
+  // =========================================================
+  // Satu kartu = satu mitra. Menghindari nama mitra berulang di banyak baris
+  // ketika mitra tsb mengikuti banyak kegiatan sekaligus.
+  const groupedByMitra = useMemo<MitraGroup[]>(() => {
+    const map = new Map<string, MitraGroup>();
+
+    penugasanList.forEach((item) => {
+      const key = item.sobat_id;
+      if (!map.has(key)) {
+        map.set(key, {
+          sobat_id: key,
+          mitra: item.mitra,
+          items: [],
+          totalAlokasi: 0,
+          totalDicairkan: 0,
+          totalSisaHonor: 0,
+          worstUsageRatio: 0,
+          worstWarnPercent: DEFAULT_WARN_PERCENT,
+        });
+      }
+      const group = map.get(key)!;
+      group.items.push(item);
+      group.totalAlokasi += Number(item.total_honor) || 0;
+      group.totalDicairkan += Number(item.jumlah_dicairkan) || 0;
+    });
+
+    const groups = Array.from(map.values()).map((group) => {
+      group.totalSisaHonor = group.totalAlokasi - group.totalDicairkan;
+
+      let worstRatio = 0;
+      let worstWarn = DEFAULT_WARN_PERCENT;
+      group.items.forEach((item) => {
+        const summary = getRowLimitSummary(item);
+        if (summary.worstUsageRatio > worstRatio) {
+          worstRatio = summary.worstUsageRatio;
+          worstWarn = summary.worstWarnPercent;
+        }
+      });
+      group.worstUsageRatio = worstRatio;
+      group.worstWarnPercent = worstWarn;
+
+      group.items = [...group.items].sort((a, b) =>
+        (a.kegiatan?.nama_kegiatan || '').localeCompare(b.kegiatan?.nama_kegiatan || '')
+      );
+
+      return group;
+    });
+
+    groups.sort((a, b) => (a.mitra?.nama_mitra || '').localeCompare(b.mitra?.nama_mitra || ''));
+
+    return groups;
+  }, [penugasanList, getRowLimitSummary]);
+
+  const totalMitraCount = groupedByMitra.length;
+  const totalPenugasanCount = penugasanList.length;
+  const totalPages = Math.ceil(totalMitraCount / itemsPerPage) || 1;
+
+  const currentGroups = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
-    return penugasanList.slice(start, start + itemsPerPage);
-  }, [penugasanList, currentPage, itemsPerPage]);
+    return groupedByMitra.slice(start, start + itemsPerPage);
+  }, [groupedByMitra, currentPage, itemsPerPage]);
 
-  const startItem = totalItems === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
-  const endItem = Math.min(currentPage * itemsPerPage, totalItems);
+  const startItem = totalMitraCount === 0 ? 0 : (currentPage - 1) * itemsPerPage + 1;
+  const endItem = Math.min(currentPage * itemsPerPage, totalMitraCount);
 
-  const currentItemIds = useMemo(() => currentData.map((item) => item.id!).filter(Boolean), [currentData]);
+  const currentItemIds = useMemo(
+    () => currentGroups.flatMap((g) => g.items.map((item) => item.id!).filter(Boolean)),
+    [currentGroups]
+  );
 
   const isAllCurrentPageSelected =
     currentItemIds.length > 0 && currentItemIds.every((id) => selectedIds.includes(id));
@@ -486,7 +819,37 @@ export default function PenugasanPage() {
     }
   };
 
+  const handleToggleSelectGroup = (groupItemIds: number[]) => {
+    const allSelected = groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
+    setSelectedIds((prev) => {
+      if (allSelected) {
+        return prev.filter((id) => !groupItemIds.includes(id));
+      }
+      return Array.from(new Set([...prev, ...groupItemIds]));
+    });
+  };
+
   const handleClearSelection = () => setSelectedIds([]);
+
+  const handleToggleExpand = (sobatId: string) => {
+    setExpandedMitraIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sobatId)) {
+        next.delete(sobatId);
+      } else {
+        next.add(sobatId);
+      }
+      return next;
+    });
+  };
+
+  const handleExpandAll = () => {
+    setExpandedMitraIds(new Set(groupedByMitra.map((g) => g.sobat_id)));
+  };
+
+  const handleCollapseAll = () => {
+    setExpandedMitraIds(new Set());
+  };
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
@@ -598,9 +961,9 @@ export default function PenugasanPage() {
     setIsEditMode(false);
 
     const defaultKegiatanId = kegiatanOptions[0]?.id || 0;
-    const defaultPeriode = kegiatanOptions[0]?.bulan_kegiatan || '';
+    const defaultPeriodeInfo = parseBulanKegiatan(kegiatanOptions[0]?.bulan_kegiatan);
 
-    const firstAvailableMitra = mitraOptions.find((m) => !checkMitraAlreadyAtLimit(m.sobat_id, defaultPeriode));
+    const firstAvailableMitra = mitraOptions.find((m) => !checkMitraAlreadyAtLimit(m.sobat_id, defaultPeriodeInfo));
 
     setFormData({
       sobat_id: firstAvailableMitra?.sobat_id || '',
@@ -640,7 +1003,7 @@ export default function PenugasanPage() {
       return;
     }
 
-    const blockedLimit = checkMitraAlreadyAtLimit(formData.sobat_id, currentFormPeriode, isEditMode ? formData.id : undefined);
+    const blockedLimit = checkMitraAlreadyAtLimit(formData.sobat_id, currentFormPeriodeInfo, isEditMode ? formData.id : undefined);
     if (blockedLimit) {
       setLimitBlockedInfo(blockedLimit);
       setIsLimitBlockedModalOpen(true);
@@ -657,19 +1020,24 @@ export default function PenugasanPage() {
       return;
     }
 
-    // Cek limit total — SEKARANG DIBLOKIR TOTAL, tidak bisa di-override lagi via confirm
+    // Cek limit total — SEKARANG DIBLOKIR TOTAL, tidak bisa di-override lagi via confirm.
+    // Karena kegiatan bisa membentang beberapa bulan, ambil bulan yang PALING PARAH
+    // (yang benar-benar melebihi limit) untuk ditampilkan di modal blokir.
     if (formLimitCheck.isExceeded) {
       const mitraInfo = mitraOptions.find((m) => m.sobat_id === formData.sobat_id);
-      const dicairkanSaatIni = accumulatedDicairkanBySobatPeriode[`${formData.sobat_id}__${currentFormPeriode}`] || 0;
+      const worstBulan = formLimitCheck.perBulan.find((b) => b.isExceeded) || formLimitCheck.worst;
+      const dicairkanSaatIni = worstBulan
+        ? accumulatedDicairkanBySobatPeriode[`${formData.sobat_id}__${worstBulan.bulan}`] || 0
+        : 0;
 
       setLimitBlockedInfo({
         namaMitra: mitraInfo?.nama_mitra || formData.sobat_id,
-        periode: currentFormPeriode,
-        limitBulanan: formLimitCheck.maxLimit,
-        hakHonorAlokasi: formLimitCheck.newTotal,
+        periode: worstBulan?.bulan || currentFormPeriodeInfo.label,
+        limitBulanan: worstBulan?.maxLimit ?? formLimitCheck.maxLimit,
+        hakHonorAlokasi: worstBulan?.newTotal ?? 0,
         sudahDicairkan: dicairkanSaatIni,
-        sisaLimit: Math.max(formLimitCheck.maxLimit - formLimitCheck.newTotal, 0),
-        persenTerpakai: Math.round((formLimitCheck.newTotal / formLimitCheck.maxLimit) * 100),
+        sisaLimit: Math.max((worstBulan?.maxLimit ?? 0) - (worstBulan?.newTotal ?? 0), 0),
+        persenTerpakai: worstBulan ? Math.round(worstBulan.usagePercent) : 0,
         sebab: 'akan_melebihi',
       });
       setIsLimitBlockedModalOpen(true);
@@ -843,7 +1211,9 @@ export default function PenugasanPage() {
               <div>
                 <h1 className="text-lg font-bold text-slate-800">Penugasan Mitra</h1>
                 <p className="text-[11px] text-slate-500">
-                  Kelola alokasi penugasan dan akumulasi limit honorarium mitra
+                  {loading
+                    ? 'Kelola alokasi penugasan dan akumulasi limit honorarium mitra'
+                    : `${totalMitraCount} mitra • ${totalPenugasanCount} penugasan — dikelompokkan per mitra karena satu mitra bisa mengikuti banyak kegiatan`}
                 </p>
               </div>
 
@@ -937,7 +1307,7 @@ export default function PenugasanPage() {
                 </button>
 
                 <div className="ml-auto flex items-center gap-2 text-[11px] text-slate-500">
-                  <span>Tampilkan:</span>
+                  <span>Mitra/halaman:</span>
                   <select
                     value={itemsPerPage}
                     onChange={(e) => {
@@ -951,7 +1321,6 @@ export default function PenugasanPage() {
                     <option value={25}>25</option>
                     <option value={50}>50</option>
                   </select>
-                  <span>baris</span>
                 </div>
               </div>
             </div>
@@ -986,186 +1355,305 @@ export default function PenugasanPage() {
               </div>
             )}
 
-            <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs text-slate-700">
-                  <thead className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                    <tr>
-                      <th className="py-3 px-3.5 text-center w-10">
+            {/* Toolbar: pilih semua di halaman ini + buka/tutup semua kartu mitra */}
+            <div className="bg-white rounded-lg shadow-sm border border-slate-200 px-4 py-2.5 mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={isAllCurrentPageSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = isSomeCurrentPageSelected;
+                  }}
+                  onChange={handleToggleSelectAllCurrentPage}
+                  disabled={currentItemIds.length === 0}
+                  className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                />
+                <span>Pilih semua penugasan di halaman ini</span>
+              </label>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleExpandAll}
+                  className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 text-slate-600 transition cursor-pointer"
+                >
+                  Buka Semua Mitra
+                </button>
+                <button
+                  onClick={handleCollapseAll}
+                  className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 text-slate-600 transition cursor-pointer"
+                >
+                  Tutup Semua Mitra
+                </button>
+              </div>
+            </div>
+
+            {/* DAFTAR MITRA (dikelompokkan) */}
+            <div className="space-y-2.5">
+              {loading ? (
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 py-10 text-center text-slate-400 text-xs">
+                  Memuat data penugasan...
+                </div>
+              ) : currentGroups.length === 0 ? (
+                <div className="bg-white rounded-lg shadow-sm border border-slate-200 py-10 text-center text-slate-400 text-xs">
+                  Tidak ada data yang sesuai dengan filter.
+                </div>
+              ) : (
+                currentGroups.map((group) => {
+                  const isExpanded = expandedMitraIds.has(group.sobat_id);
+                  const groupItemIds = group.items.map((i) => i.id!).filter(Boolean);
+                  const isGroupFullySelected =
+                    groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
+                  const isGroupPartiallySelected =
+                    groupItemIds.some((id) => selectedIds.includes(id)) && !isGroupFullySelected;
+
+                  let statusLimitLabel = 'Tersedia';
+                  let statusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                  if (group.worstUsageRatio >= 100) {
+                    statusLimitLabel = 'Limit Terlampaui';
+                    statusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
+                  } else if (group.worstUsageRatio >= group.worstWarnPercent) {
+                    statusLimitLabel = 'Mendekati Limit';
+                    statusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
+                  }
+
+                  return (
+                    <div
+                      key={group.sobat_id}
+                      className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden"
+                    >
+                      {/* HEADER KARTU MITRA */}
+                      <div
+                        className={`flex flex-wrap items-center gap-3 px-4 py-3 ${
+                          isExpanded ? 'bg-slate-50/70 border-b border-slate-200' : ''
+                        }`}
+                      >
                         <input
                           type="checkbox"
-                          checked={isAllCurrentPageSelected}
+                          checked={isGroupFullySelected}
                           ref={(el) => {
-                            if (el) el.indeterminate = isSomeCurrentPageSelected;
+                            if (el) el.indeterminate = isGroupPartiallySelected;
                           }}
-                          onChange={handleToggleSelectAllCurrentPage}
-                          disabled={currentData.length === 0}
-                          className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                          onChange={() => handleToggleSelectGroup(groupItemIds)}
+                          className="w-3.5 h-3.5 accent-blue-600 cursor-pointer shrink-0"
                         />
-                      </th>
-                      <th className="py-3 px-3.5 text-center w-10">No</th>
-                      <th className="py-3 px-3.5">Nama Mitra & SOBAT ID</th>
-                      <th className="py-3 px-3.5">Posisi / Kegiatan</th>
-                      <th className="py-3 px-3.5 text-right">Hak Honor Alokasi</th>
-                      <th className="py-3 px-3.5 text-right">Dicairkan</th>
-                      <th className="py-3 px-3.5 text-right">Sisa Honor Kegiatan</th>
-                      <th className="py-3 px-3.5 text-right">Sisa Limit Periode</th>
-                      <th className="py-3 px-3.5 text-center">Status Limit</th>
-                      <th className="py-3 px-3.5 text-center">Aksi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {loading ? (
-                      <tr>
-                        <td colSpan={10} className="py-8 text-center text-slate-400">
-                          Memuat data penugasan...
-                        </td>
-                      </tr>
-                    ) : currentData.length === 0 ? (
-                      <tr>
-                        <td colSpan={10} className="py-8 text-center text-slate-400">
-                          Tidak ada data yang sesuai dengan filter.
-                        </td>
-                      </tr>
-                    ) : (
-                      currentData.map((item, index) => {
-                        const isChecked = selectedIds.includes(item.id!);
-                        const periode = item.kegiatan?.bulan_kegiatan || '';
-                        const { maxLimit, warnPercent } = getLimitForPeriode(periode);
 
-                        const totalAllocated = accumulatedHonorBySobatPeriode[`${item.sobat_id}__${periode}`] || 0;
-                        const hakHonorAlokasi = Number(item.total_honor) || 0;
-                        const dicairkan = Number(item.jumlah_dicairkan) || 0;
-                        const sisaHonorKegiatan = hakHonorAlokasi - dicairkan;
-                        const sisaLimit = maxLimit - totalAllocated;
+                        <button
+                          type="button"
+                          onClick={() => handleToggleExpand(group.sobat_id)}
+                          className="flex items-center gap-3 min-w-[220px] flex-1 text-left cursor-pointer"
+                        >
+                          <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-sm shrink-0">
+                            {(group.mitra?.nama_mitra || '?').charAt(0).toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-800 text-sm truncate">
+                              {group.mitra?.nama_mitra || '-'}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
+                              <span className="font-mono text-blue-600">{group.sobat_id}</span>
+                              {group.mitra?.posisi_mitra && <span className="truncate">• {group.mitra.posisi_mitra}</span>}
+                            </div>
+                          </div>
+                        </button>
 
-                        const usageRatio = maxLimit > 0 ? (totalAllocated / maxLimit) * 100 : 0;
-                        let statusLimitLabel = 'Tersedia';
-                        let statusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                        <div className="flex items-center gap-4 text-[11px] shrink-0">
+                          <div className="text-center">
+                            <div className="text-slate-400">Kegiatan</div>
+                            <div className="font-semibold text-slate-700 bg-slate-100 rounded px-1.5">
+                              {group.items.length}
+                            </div>
+                          </div>
+                          <div className="text-right hidden sm:block">
+                            <div className="text-slate-400">Total Alokasi</div>
+                            <div className="font-semibold text-blue-600">{formatRupiah(group.totalAlokasi)}</div>
+                          </div>
+                          <div className="text-right hidden md:block">
+                            <div className="text-slate-400">Dicairkan</div>
+                            <div className="font-semibold text-emerald-600">{formatRupiah(group.totalDicairkan)}</div>
+                          </div>
+                          <div className="text-right hidden lg:block">
+                            <div className="text-slate-400">Sisa</div>
+                            <div className="font-semibold text-amber-600">{formatRupiah(group.totalSisaHonor)}</div>
+                          </div>
+                        </div>
 
-                        if (usageRatio >= 100) {
-                          statusLimitLabel = 'Limit Terlampaui';
-                          statusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
-                        } else if (usageRatio >= warnPercent) {
-                          statusLimitLabel = 'Mendekati Limit';
-                          statusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
-                        }
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-medium border shrink-0 ${statusStyle}`}
+                        >
+                          {statusLimitLabel}
+                        </span>
 
-                        return (
-                          <tr
-                            key={item.id || index}
-                            className={`hover:bg-slate-50/80 transition ${isChecked ? 'bg-blue-50/50' : ''}`}
-                          >
-                            <td className="py-2.5 px-3.5 text-center">
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => handleToggleSelectOne(item.id!)}
-                                className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
-                              />
-                            </td>
-                            <td className="py-2.5 px-3.5 text-center font-medium text-slate-400">
-                              {(currentPage - 1) * itemsPerPage + index + 1}
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <div className="font-semibold text-slate-800">{item.mitra?.nama_mitra}</div>
-                              <div className="text-[11px] font-mono text-blue-600">{item.sobat_id}</div>
-                            </td>
-                            <td className="py-2.5 px-3.5">
-                              <div className="font-medium text-slate-800">{item.mitra?.posisi_mitra || '-'}</div>
-                              <div className="text-[10px] text-slate-400">
-                                {item.kegiatan?.nama_kegiatan || '-'} ({periode || '-'})
-                              </div>
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-semibold text-blue-600">
-                              {formatRupiah(hakHonorAlokasi)}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-semibold text-emerald-600">
-                              {formatRupiah(dicairkan)}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-medium">
-                              {sisaHonorKegiatan <= 0 && hakHonorAlokasi > 0 ? (
-                                <span className="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-200">
-                                  Lunas
-                                </span>
-                              ) : (
-                                <span className="text-amber-600 font-semibold">{formatRupiah(sisaHonorKegiatan)}</span>
-                              )}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-right font-semibold text-slate-700">
-                              {formatRupiah(sisaLimit)}
-                            </td>
-                            <td className="py-2.5 px-3.5 text-center">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${statusStyle}`}>
-                                {statusLimitLabel}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3.5 text-center">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => {
-                                    setDetailPenugasan(item);
-                                    setIsDetailModalOpen(true);
-                                  }}
-                                  className="p-1.5 text-blue-600 hover:bg-blue-50 border border-blue-200 rounded-md transition cursor-pointer"
-                                  title="Detail"
-                                >
-                                  👁️
-                                </button>
-                                <button
-                                  onClick={() => handleOpenEditModal(item)}
-                                  className="p-1.5 text-slate-600 hover:bg-slate-100 border border-slate-200 rounded-md transition cursor-pointer"
-                                  title="Edit"
-                                >
-                                  ✏️
-                                </button>
-                                <button
-                                  onClick={() => handleOpenPencairanModal(item)}
-                                  className="p-1.5 text-emerald-600 hover:bg-emerald-50 border border-emerald-200 rounded-md transition cursor-pointer"
-                                  title="Pencairan Honor"
-                                >
-                                  💰
-                                </button>
-                                <button
-                                  onClick={() => handleDeletePenugasan(item.id!, item.mitra?.nama_mitra || '')}
-                                  className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
-                                  title="Hapus"
-                                >
-                                  🗑️
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleExpand(group.sobat_id)}
+                          className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition cursor-pointer shrink-0"
+                          title={isExpanded ? 'Tutup rincian kegiatan' : 'Buka rincian kegiatan'}
+                        >
+                          {isExpanded ? '▲' : '▼'}
+                        </button>
+                      </div>
+
+                      {/* RINCIAN KEGIATAN MITRA (saat dibuka) */}
+                      {isExpanded && (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs text-slate-700">
+                            <thead className="bg-slate-50/60 border-b border-slate-100 text-slate-500 font-semibold">
+                              <tr>
+                                <th className="py-2 px-3.5 w-8"></th>
+                                <th className="py-2 px-3.5">Kegiatan</th>
+                                <th className="py-2 px-3.5 text-right">Hak Honor Alokasi</th>
+                                <th className="py-2 px-3.5 text-right">Dicairkan</th>
+                                <th className="py-2 px-3.5 text-right">Sisa Honor</th>
+                                <th className="py-2 px-3.5 text-right">Sisa Limit Periode</th>
+                                <th className="py-2 px-3.5 text-center">Status Limit</th>
+                                <th className="py-2 px-3.5 text-center">Aksi</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-50">
+                              {group.items.map((item) => {
+                                const isChecked = selectedIds.includes(item.id!);
+                                const rowSummary = getRowLimitSummary(item);
+
+                                const hakHonorAlokasi = Number(item.total_honor) || 0;
+                                const dicairkan = Number(item.jumlah_dicairkan) || 0;
+                                const sisaHonorKegiatan = hakHonorAlokasi - dicairkan;
+                                const sisaLimit = rowSummary.sisaLimitMin;
+
+                                const usageRatio = rowSummary.worstUsageRatio;
+                                const warnPercent = rowSummary.worstWarnPercent;
+                                let rowStatusLabel = 'Tersedia';
+                                let rowStatusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+
+                                if (usageRatio >= 100) {
+                                  rowStatusLabel = 'Limit Terlampaui';
+                                  rowStatusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
+                                } else if (usageRatio >= warnPercent) {
+                                  rowStatusLabel = 'Mendekati Limit';
+                                  rowStatusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
+                                }
+
+                                return (
+                                  <tr
+                                    key={item.id}
+                                    className={`hover:bg-slate-50/80 transition ${isChecked ? 'bg-blue-50/50' : ''}`}
+                                  >
+                                    <td className="py-2.5 px-3.5 text-center">
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={() => handleToggleSelectOne(item.id!)}
+                                        className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                                      />
+                                    </td>
+                                    <td className="py-2.5 px-3.5">
+                                      <div className="font-medium text-slate-800">{item.kegiatan?.nama_kegiatan || '-'}</div>
+                                      <div className="text-[10px] text-slate-400">
+                                        {rowSummary.label}
+                                        {item.kegiatan?.kode_kegiatan ? ` • ${item.kegiatan.kode_kegiatan}` : ''}
+                                      </div>
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-right font-semibold text-blue-600">
+                                      {formatRupiah(hakHonorAlokasi)}
+                                      {rowSummary.jumlahBulan > 1 && (
+                                        <div className="text-[10px] font-normal text-slate-400">
+                                          ≈ {formatRupiah(rowSummary.honorPerBulan)}/bulan × {rowSummary.jumlahBulan} bln
+                                        </div>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-right font-semibold text-emerald-600">
+                                      {formatRupiah(dicairkan)}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-right font-medium">
+                                      {sisaHonorKegiatan <= 0 && hakHonorAlokasi > 0 ? (
+                                        <span className="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-200">
+                                          Lunas
+                                        </span>
+                                      ) : (
+                                        <span className="text-amber-600 font-semibold">{formatRupiah(sisaHonorKegiatan)}</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-right font-semibold text-slate-700">
+                                      {formatRupiah(sisaLimit)}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-center">
+                                      <span
+                                        className={`px-2 py-0.5 rounded text-[10px] font-medium border ${rowStatusStyle}`}
+                                      >
+                                        {rowStatusLabel}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-center">
+                                      <div className="flex items-center justify-center gap-1.5">
+                                        <button
+                                          onClick={() => {
+                                            setDetailPenugasan(item);
+                                            setIsDetailModalOpen(true);
+                                          }}
+                                          className="p-1.5 text-blue-600 hover:bg-blue-50 border border-blue-200 rounded-md transition cursor-pointer"
+                                          title="Detail"
+                                        >
+                                          👁️
+                                        </button>
+                                        <button
+                                          onClick={() => handleOpenEditModal(item)}
+                                          className="p-1.5 text-slate-600 hover:bg-slate-100 border border-slate-200 rounded-md transition cursor-pointer"
+                                          title="Edit"
+                                        >
+                                          ✏️
+                                        </button>
+                                        <button
+                                          onClick={() => handleOpenPencairanModal(item)}
+                                          className="p-1.5 text-emerald-600 hover:bg-emerald-50 border border-emerald-200 rounded-md transition cursor-pointer"
+                                          title="Pencairan Honor"
+                                        >
+                                          💰
+                                        </button>
+                                        <button
+                                          onClick={() => handleDeletePenugasan(item.id!, item.mitra?.nama_mitra || '')}
+                                          className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
+                                          title="Hapus"
+                                        >
+                                          🗑️
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* PAGINATION */}
+            <div className="mt-3 px-4 py-3 bg-white rounded-lg shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+              <div>
+                Menampilkan mitra <strong>{startItem}</strong> - <strong>{endItem}</strong> dari total{' '}
+                <strong>{totalMitraCount}</strong> mitra ({totalPenugasanCount} penugasan)
               </div>
-
-              <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
-                <div>
-                  Menampilkan <strong>{startItem}</strong> - <strong>{endItem}</strong> dari total <strong>{totalItems}</strong> penugasan
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-600 transition cursor-pointer"
-                  >
-                    Sebelumnya
-                  </button>
-                  <span className="px-3 py-1 font-medium text-slate-700">
-                    {currentPage} / {totalPages}
-                  </span>
-                  <button
-                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={currentPage === totalPages}
-                    className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-600 transition cursor-pointer"
-                  >
-                    Selanjutnya
-                  </button>
-                </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-600 transition cursor-pointer"
+                >
+                  Sebelumnya
+                </button>
+                <span className="px-3 py-1 font-medium text-slate-700">
+                  {currentPage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-2.5 py-1 border border-slate-200 rounded bg-white hover:bg-slate-100 disabled:opacity-50 text-slate-600 transition cursor-pointer"
+                >
+                  Selanjutnya
+                </button>
               </div>
             </div>
           </div>
@@ -1232,7 +1720,7 @@ export default function PenugasanPage() {
                         {mitraOptions.map((m) => {
                           const sudahLimit = !!checkMitraAlreadyAtLimit(
                             m.sobat_id,
-                            currentFormPeriode,
+                            currentFormPeriodeInfo,
                             isEditMode ? formData.id : undefined
                           );
                           const sudahDitugaskan = !!checkDuplicateAssignment(
@@ -1291,28 +1779,40 @@ export default function PenugasanPage() {
                         }`}
                         required
                       />
-                      {formData.sobat_id && currentFormPeriode && (
-                        <p
-                          className={`text-[10px] mt-1 ${
-                            formLimitCheck.isExceeded
-                              ? 'text-rose-600 font-semibold'
-                              : formLimitCheck.isWarning
-                              ? 'text-amber-600 font-medium'
-                              : 'text-slate-400'
-                          }`}
-                        >
-                          {formLimitCheck.isExceeded ? (
-                            <>
-                              ⛔ Proyeksi total periode {currentFormPeriode}: {formatRupiah(formLimitCheck.newTotal)} — melebihi
-                              limit {formatRupiah(formLimitCheck.maxLimit)}. Kurangi nominalnya untuk bisa menyimpan.
-                            </>
-                          ) : (
-                            <>
-                              Total setelah disimpan: {formatRupiah(formLimitCheck.newTotal)} dari limit{' '}
-                              {formatRupiah(formLimitCheck.maxLimit)}
-                            </>
+                      {formData.sobat_id && currentFormPeriodeInfo.months.length > 0 && (
+                        <div className="mt-1.5 space-y-1">
+                          {currentFormPeriodeInfo.jumlahBulan > 1 && (
+                            <p className="text-[10px] text-slate-500">
+                              Kegiatan ini berlangsung <strong>{currentFormPeriodeInfo.jumlahBulan} bulan</strong> ({currentFormPeriodeInfo.label}) — honor dibagi rata{' '}
+                              <strong>{formatRupiah(formLimitCheck.honorPerBulan)}/bulan</strong>.
+                            </p>
                           )}
-                        </p>
+                          <div className="space-y-0.5">
+                            {formLimitCheck.perBulan.map((b) => (
+                              <div
+                                key={b.bulan}
+                                className={`flex justify-between items-center text-[10px] px-2 py-1 rounded ${
+                                  b.isExceeded
+                                    ? 'bg-rose-50 text-rose-600 font-semibold'
+                                    : b.isWarning
+                                    ? 'bg-amber-50 text-amber-600 font-medium'
+                                    : 'bg-slate-50 text-slate-400'
+                                }`}
+                              >
+                                <span>{b.bulan}</span>
+                                <span>
+                                  {formatRupiah(b.newTotal)} / {formatRupiah(b.maxLimit)}
+                                  {b.isExceeded ? ' ⛔' : ''}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          {formLimitCheck.isExceeded && (
+                            <p className="text-[10px] text-rose-600 font-semibold">
+                              ⛔ Ada bulan yang melebihi limit. Kurangi nominalnya untuk bisa menyimpan.
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
 
@@ -1406,6 +1906,19 @@ export default function PenugasanPage() {
                 <span className="text-slate-500">Periode:</span>
                 <span className="font-medium text-slate-800">{detailPenugasan.kegiatan?.bulan_kegiatan || '-'}</span>
               </div>
+              {(() => {
+                const periodeInfo = parseBulanKegiatan(detailPenugasan.kegiatan?.bulan_kegiatan);
+                if (periodeInfo.jumlahBulan <= 1) return null;
+                const honorPerBulan = (Number(detailPenugasan.total_honor) || 0) / periodeInfo.jumlahBulan;
+                return (
+                  <div className="flex justify-between border-b pb-2">
+                    <span className="text-slate-500">Rincian Honor/Bulan:</span>
+                    <span className="font-medium text-slate-800">
+                      {formatRupiah(honorPerBulan)} × {periodeInfo.jumlahBulan} bulan
+                    </span>
+                  </div>
+                );
+              })()}
               <div className="flex justify-between border-b pb-2">
                 <span className="text-slate-500">Hak Honor Alokasi:</span>
                 <span className="font-semibold text-blue-600">{formatRupiah(detailPenugasan.total_honor || 0)}</span>
