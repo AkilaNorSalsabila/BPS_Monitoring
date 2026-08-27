@@ -48,6 +48,56 @@ const TAHUN_OPTIONS = Array.from(
   (_, i) => String(new Date().getFullYear() - 2 + i)
 );
 
+// ============================================================
+// HELPER PERIODE KEGIATAN
+// ============================================================
+// Menghitung berapa bulan yang dicakup oleh rentang mulai -> selesai.
+// Disamakan persis dengan logika di halaman Kegiatan (hitungDurasiBulan)
+// supaya kegiatan yang lahir dari impor Excel Mitra dan kegiatan yang
+// dibuat manual selalu punya format & cara hitung yang sama.
+const hitungDurasiBulanKegiatan = (
+  bulanMulai: string,
+  tahunMulai: string,
+  bulanSelesai: string,
+  tahunSelesai: string
+) => {
+  const idxMulai = BULAN_OPTIONS.indexOf(bulanMulai);
+  const idxSelesai = BULAN_OPTIONS.indexOf(bulanSelesai);
+  const yearMulai = parseInt(tahunMulai, 10);
+  const yearSelesai = parseInt(tahunSelesai, 10);
+
+  const totalBulan =
+    (yearSelesai - yearMulai) * 12 + (idxSelesai - idxMulai) + 1;
+
+  return totalBulan > 0 ? totalBulan : 1;
+};
+
+// Membentuk teks periode kegiatan lengkap dengan keterangan jumlah
+// bulan, mis. "Agustus 2026 (1 Bulan)" atau
+// "Agustus 2026 s.d. Desember 2026 (5 Bulan)".
+// Format ini SAMA PERSIS dengan yang dipakai halaman Kegiatan, supaya
+// kegiatan yang lahir dari impor Excel Mitra tampil konsisten di
+// seluruh aplikasi (termasuk di halaman Penugasan & Monitoring Limit).
+const formatPeriodeKegiatan = (
+  bulanMulai: string,
+  tahunMulai: string,
+  bulanSelesai: string,
+  tahunSelesai: string
+) => {
+  const durasiBulan = hitungDurasiBulanKegiatan(
+    bulanMulai,
+    tahunMulai,
+    bulanSelesai,
+    tahunSelesai
+  );
+
+  if (bulanMulai === bulanSelesai && tahunMulai === tahunSelesai) {
+    return `${bulanMulai} ${tahunMulai} (1 Bulan)`;
+  }
+
+  return `${bulanMulai} ${tahunMulai} s.d. ${bulanSelesai} ${tahunSelesai} (${durasiBulan} Bulan)`;
+};
+
 export default function MitraPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
@@ -664,8 +714,17 @@ export default function MitraPage() {
           );
         }
 
-        const bulanKegiatanDisisipkan =
-          `${selectedBulanMulai} ${selectedTahunMulai} - ${selectedBulanSelesai} ${selectedTahunSelesai}`;
+        // Teks periode kini menyertakan keterangan jumlah bulan
+        // (mis. "Agustus 2026 (1 Bulan)" atau
+        // "Agustus 2026 s.d. Desember 2026 (5 Bulan)"), disamakan
+        // persis dengan format di halaman Kegiatan supaya konsisten
+        // di seluruh aplikasi.
+        const bulanKegiatanDisisipkan = formatPeriodeKegiatan(
+          selectedBulanMulai,
+          selectedTahunMulai,
+          selectedBulanSelesai,
+          selectedTahunSelesai
+        );
 
         let kegiatanId: number | null = null;
 
@@ -1785,6 +1844,21 @@ export default function MitraPage() {
                     </div>
                   </div>
                 </div>
+
+                {/* Pratinjau keterangan jumlah bulan, dihitung live
+                    dari pilihan mulai/selesai di atas — supaya admin
+                    tahu persis teks periode yang akan tersimpan. */}
+                <p className="text-[10.5px] text-slate-500 bg-slate-50 rounded px-2.5 py-1.5">
+                  Periode kegiatan akan tersimpan sebagai:{' '}
+                  <strong className="text-slate-700">
+                    {formatPeriodeKegiatan(
+                      selectedBulanMulai,
+                      selectedTahunMulai,
+                      selectedBulanSelesai,
+                      selectedTahunSelesai
+                    )}
+                  </strong>
+                </p>
               </div>
 
               <div className="pt-2 flex justify-end gap-2">

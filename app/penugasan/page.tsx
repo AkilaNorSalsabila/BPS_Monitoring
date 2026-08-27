@@ -210,27 +210,62 @@ const generateMonthSequence = (startMonthIdx: number, startYear: number, count: 
   return result;
 };
 
-const RANGE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*-\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})$/;
-const SINGLE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*\((\d+)\s*Bulan\)$/i;
+const RANGE_REGEX =
+  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*-\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})$/i;
 
-const parseBulanKegiatan = (raw: string | null | undefined): PeriodeKegiatan => {
+const RANGE_SD_REGEX =
+  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*s\.?\s*d\.?\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})(?:\s*\((\d+)\s*Bulan\))?$/i;
+
+const SINGLE_REGEX =
+  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*\((\d+)\s*Bulan\)$/i;
+
+const parseBulanKegiatan = (
+  raw: string | null | undefined
+): PeriodeKegiatan => {
   const text = (raw || '').trim();
-  if (!text) return { months: [], jumlahBulan: 0, label: '-' };
 
-  // Format 1: rentang "Agustus 2026 - Oktober 2026"
+  if (!text) {
+    return {
+      months: [],
+      jumlahBulan: 0,
+      label: '-',
+    };
+  }
+
+  // =========================================================
+  // FORMAT 1:
+  // "Agustus 2026 - Oktober 2026"
+  // =========================================================
   const rangeMatch = text.match(RANGE_REGEX);
+
   if (rangeMatch) {
-    const [, startName, startYearStr, endName, endYearStr] = rangeMatch;
+    const [
+      ,
+      startName,
+      startYearStr,
+      endName,
+      endYearStr,
+    ] = rangeMatch;
+
     const startIdx = monthIndexFromName(startName);
     const endIdx = monthIndexFromName(endName);
+
     const startYear = parseInt(startYearStr, 10);
     const endYear = parseInt(endYearStr, 10);
 
     if (startIdx !== -1 && endIdx !== -1) {
-      const totalBulan = (endYear - startYear) * 12 + (endIdx - startIdx) + 1;
+      const totalBulan =
+        (endYear - startYear) * 12 +
+        (endIdx - startIdx) +
+        1;
+
       if (totalBulan > 0 && totalBulan <= 36) {
         return {
-          months: generateMonthSequence(startIdx, startYear, totalBulan),
+          months: generateMonthSequence(
+            startIdx,
+            startYear,
+            totalBulan
+          ),
           jumlahBulan: totalBulan,
           label: text,
         };
@@ -238,25 +273,121 @@ const parseBulanKegiatan = (raw: string | null | undefined): PeriodeKegiatan => 
     }
   }
 
-  // Format 2: bulan tunggal + keterangan durasi "Agustus 2026 (1 Bulan)"
+  // =========================================================
+  // FORMAT 2:
+  // "Agustus 2026 s.d. November 2026 (4 Bulan)"
+  //
+  // Bisa juga:
+  // "Agustus 2026 s.d November 2026 (4 Bulan)"
+  // "Agustus 2026 sd. November 2026 (4 Bulan)"
+  // "Agustus 2026 sd November 2026"
+  // =========================================================
+  const rangeSdMatch = text.match(RANGE_SD_REGEX);
+
+  if (rangeSdMatch) {
+    const [
+      ,
+      startName,
+      startYearStr,
+      endName,
+      endYearStr,
+      jumlahStr,
+    ] = rangeSdMatch;
+
+    const startIdx = monthIndexFromName(startName);
+    const endIdx = monthIndexFromName(endName);
+
+    const startYear = parseInt(startYearStr, 10);
+    const endYear = parseInt(endYearStr, 10);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+      // Hitung jumlah bulan berdasarkan tanggal awal dan akhir.
+      const calculatedJumlahBulan =
+        (endYear - startYear) * 12 +
+        (endIdx - startIdx) +
+        1;
+
+      if (
+        calculatedJumlahBulan > 0 &&
+        calculatedJumlahBulan <= 36
+      ) {
+        // Kalau database mencantumkan "(4 Bulan)",
+        // kita gunakan angka tersebut hanya jika valid.
+        //
+        // Namun untuk menjaga data tetap konsisten,
+        // jumlah bulan berdasarkan rentang tanggal
+        // menjadi acuan utama.
+        const jumlahBulanDariTeks = jumlahStr
+          ? parseInt(jumlahStr, 10)
+          : calculatedJumlahBulan;
+
+        const jumlahBulan =
+          jumlahBulanDariTeks > 0 &&
+          jumlahBulanDariTeks <= 36
+            ? jumlahBulanDariTeks
+            : calculatedJumlahBulan;
+
+        return {
+          months: generateMonthSequence(
+            startIdx,
+            startYear,
+            jumlahBulan
+          ),
+          jumlahBulan,
+          label: text,
+        };
+      }
+    }
+  }
+
+  // =========================================================
+  // FORMAT 3:
+  // "Agustus 2026 (1 Bulan)"
+  //
+  // Jumlah bisa lebih dari 1:
+  // "Agustus 2026 (4 Bulan)"
+  // =========================================================
   const singleMatch = text.match(SINGLE_REGEX);
+
   if (singleMatch) {
-    const [, monthName, yearStr, jumlahStr] = singleMatch;
+    const [
+      ,
+      monthName,
+      yearStr,
+      jumlahStr,
+    ] = singleMatch;
+
     const startIdx = monthIndexFromName(monthName);
-    const jumlah = Math.max(parseInt(jumlahStr, 10) || 1, 1);
+
+    const jumlah = Math.max(
+      parseInt(jumlahStr, 10) || 1,
+      1
+    );
 
     if (startIdx !== -1) {
       return {
-        months: generateMonthSequence(startIdx, parseInt(yearStr, 10), jumlah),
+        months: generateMonthSequence(
+          startIdx,
+          parseInt(yearStr, 10),
+          jumlah
+        ),
         jumlahBulan: jumlah,
         label: text,
       };
     }
   }
 
-  // Fallback: kalau format tidak dikenali, anggap 1 bulan apa adanya
-  // (supaya tidak error, tapi tetap tervalidasi/terhitung sebagai 1 periode)
-  return { months: [text], jumlahBulan: 1, label: text };
+  // =========================================================
+  // FORMAT 4 / FALLBACK:
+  // Kalau format benar-benar tidak dikenali,
+  // tetap pertahankan perilaku lama:
+  // dianggap 1 bulan.
+  // =========================================================
+  return {
+    months: [text],
+    jumlahBulan: 1,
+    label: text,
+  };
 };
 
 // =========================================================
