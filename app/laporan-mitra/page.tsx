@@ -55,24 +55,90 @@ const BULAN_OPTIONS = [
   'Desember',
 ];
 
-const BULAN_NUMBER: Record<string, string> = {
-  Januari: '01',
-  Februari: '02',
-  Maret: '03',
-  April: '04',
-  Mei: '05',
-  Juni: '06',
-  Juli: '07',
-  Agustus: '08',
-  September: '09',
-  Oktober: '10',
-  November: '11',
-  Desember: '12',
-};
-
 // Laporan hanya menampilkan mitra/pegawai yang SUDAH mencapai limit.
 // "Mencapai limit" = total hak honor alokasi >= batas maksimal periode.
 const STATUS_FILTER_OPTIONS = ['Semua', 'Mencapai Limit', 'Limit Terlampaui'];
+
+const NAMA_BULAN_ID = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+];
+
+// =========================================================
+// PARSER PERIODE KEGIATAN MULTI-BULAN
+// =========================================================
+// kegiatan.bulan_kegiatan bisa berisi macam-macam format penulisan rentang,
+// mis. "Agustus 2026 - Oktober 2026", "Agustus 2026 s.d. Oktober 2026 (3
+// Bulan)", "Agustus 2026 sampai dengan Oktober 2026", dst — kata
+// penghubungnya bisa apa saja. Daripada menebak-nebak semua variasi kalimat,
+// parser ini cukup MENCARI SEMUA pasangan "NamaBulan Tahun" di dalam teks,
+// lalu memakai yang pertama & terakhir sebagai awal-akhir rentang. Ini jauh
+// lebih tahan-banting terhadap variasi format penulisan.
+
+interface PeriodeKegiatan {
+  months: string[];
+  jumlahBulan: number;
+  label: string;
+}
+
+const monthIndexFromName = (name: string): number =>
+  NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
+
+const generateMonthSequence = (startMonthIdx: number, startYear: number, count: number): string[] => {
+  const result: string[] = [];
+  let idx = startMonthIdx;
+  let year = startYear;
+  for (let i = 0; i < count; i++) {
+    result.push(`${NAMA_BULAN_ID[idx]} ${year}`);
+    idx++;
+    if (idx > 11) {
+      idx = 0;
+      year++;
+    }
+  }
+  return result;
+};
+
+const MONTH_YEAR_REGEX = /([A-Za-zÀ-ÿ]+)\s+(\d{4})/g;
+
+const parseBulanKegiatan = (raw: string | null | undefined): PeriodeKegiatan => {
+  const text = (raw || '').trim();
+  if (!text) return { months: [], jumlahBulan: 0, label: '-' };
+
+  const matches = [...text.matchAll(MONTH_YEAR_REGEX)]
+    .map((m) => ({ idx: monthIndexFromName(m[1]), year: parseInt(m[2], 10) }))
+    .filter((m) => m.idx !== -1);
+
+  // Ada 2+ pasangan bulan-tahun (mis. "Agustus 2026 ... Oktober 2026")
+  // -> anggap sebagai rentang dari yang pertama sampai yang terakhir.
+  if (matches.length >= 2) {
+    const start = matches[0];
+    const end = matches[matches.length - 1];
+    const totalBulan = (end.year - start.year) * 12 + (end.idx - start.idx) + 1;
+    if (totalBulan > 0 && totalBulan <= 36) {
+      return {
+        months: generateMonthSequence(start.idx, start.year, totalBulan),
+        jumlahBulan: totalBulan,
+        label: text,
+      };
+    }
+  }
+
+  // Cuma 1 pasangan bulan-tahun -> cek ada keterangan "(N Bulan)" di teks,
+  // mis. "Agustus 2026 (1 Bulan)" atau "Agustus 2026 (3 Bulan)".
+  if (matches.length === 1) {
+    const bulanCountMatch = text.match(/\(?\s*(\d+)\s*bulan\s*\)?/i);
+    const jumlah = bulanCountMatch ? Math.max(parseInt(bulanCountMatch[1], 10) || 1, 1) : 1;
+    return {
+      months: generateMonthSequence(matches[0].idx, matches[0].year, jumlah),
+      jumlahBulan: jumlah,
+      label: text,
+    };
+  }
+
+  // Tidak ada pola "NamaBulan Tahun" yang bisa diurai sama sekali.
+  return { months: [text], jumlahBulan: 1, label: text };
+};
 
 // =========================================================
 // INTERFACE
@@ -110,25 +176,48 @@ interface PenugasanRaw {
 
 type StatusLimit = 'Mencapai Limit' | 'Limit Terlampaui';
 
+// Satu "kontribusi" = sumbangan honor dari SATU kegiatan ke SATU baris
+// laporan (mitra + bulan) gabungan. Satu baris laporan bisa berisi lebih
+// dari satu kontribusi kalau mitra ybs mengikuti beberapa kegiatan yang
+// sama-sama menyentuh bulan tsb.
+interface KontribusiKegiatan {
+  kegiatanId: number;
+  namaKegiatan: string;
+  honorBulanIni: number;
+  totalHonorKegiatan: number;
+  jumlahBulanKegiatan: number;
+  periodeAsliKegiatan: string;
+}
+
 interface LaporanRow {
-  id: number;
+  // Kunci unik baris = kombinasi mitra + bulan (BUKAN per kegiatan lagi),
+  // supaya mitra yang sama pada bulan yang sama HANYA muncul satu baris,
+  // walau ia mengikuti banyak kegiatan berbeda pada bulan itu. Mitra yang
+  // sama pada BULAN BERBEDA tetap jadi baris terpisah, karena limit memang
+  // dihitung per bulan — tidak boleh ikut tergabung lintas periode.
+  id: string;
   sobatId: string;
   namaPegawai: string;
   nikNip: string;
-  kegiatanId: number;
-  namaKegiatan: string;
+
+  // Bulan spesifik yang terkena limit (mis. "September 2026").
   periode: string;
 
-  // Hak honor alokasi pada penugasan terkait.
+  // Daftar kegiatan yang menyusun total honor baris ini pada bulan tsb.
+  kegiatanList: KontribusiKegiatan[];
+
+  // Total GABUNGAN hak honor alokasi dari SEMUA kegiatan pada bulan ini
+  // (sama persis dengan totalAllocated di bawah — dipisah supaya jelas
+  // makna "yang ditampilkan sebagai honor terpakai").
   terpakai: number;
 
-  // Sisa limit periode, mengikuti logika halaman Penugasan.
+  // Sisa limit periode (bulan tsb).
   limit: number;
 
-  // Total hak honor alokasi seluruh penugasan mitra pada periode.
+  // Total hak honor alokasi seluruh penugasan mitra pada bulan tsb.
   totalAllocated: number;
 
-  // Batas maksimal limit periode.
+  // Batas maksimal limit bulan tsb.
   maxLimit: number;
 
   presentase: number;
@@ -172,7 +261,9 @@ export default function LaporanPegawaiLimitPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const [rawData, setRawData] = useState<PenugasanRaw[]>([]);
-  const [limitByPeriode, setLimitByPeriode] = useState<Record<string, LimitHonor>>({});
+  // Disimpan sebagai array (bukan Record dengan exact-key) supaya bisa
+  // dicocokkan secara fleksibel via isMatchingMonth — sama seperti Penugasan.
+  const [limitList, setLimitList] = useState<LimitHonor[]>([]);
   const [kegiatanOptions, setKegiatanOptions] = useState<KegiatanOption[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -253,13 +344,7 @@ export default function LaporanPegawaiLimitPage() {
         return;
       }
 
-      const map: Record<string, LimitHonor> = {};
-
-      (data || []).forEach((row: LimitHonor) => {
-        map[row.bulan_periode] = row;
-      });
-
-      setLimitByPeriode(map);
+      setLimitList(data || []);
     } catch (err) {
       console.error('Error fetching limit_honor:', err);
     }
@@ -319,15 +404,15 @@ export default function LaporanPegawaiLimitPage() {
   // =========================================================
 
   const getLimitForPeriode = useCallback(
-    (periode: string) => {
-      const info = limitByPeriode[periode];
+    (bulan: string) => {
+      const info = limitList.find((row) => isMatchingMonth(bulan, row.bulan_periode));
 
       return {
         maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
         warnPercent: info?.persen_peringatan ?? DEFAULT_WARN_PERCENT,
       };
     },
-    [limitByPeriode]
+    [limitList, isMatchingMonth]
   );
 
   // =========================================================
@@ -337,119 +422,139 @@ export default function LaporanPegawaiLimitPage() {
   // accumulatedHonorBySobatPeriode pada halaman Penugasan.
   //
   // Jadi:
-  // totalAllocated = SUM(penugasan.total_honor)
-  // untuk SOBAT yang sama pada periode yang sama.
+  // totalAllocated = SUM(penugasan.total_honor / jumlah bulan kegiatan)
+  // untuk SOBAT yang sama pada BULAN yang sama, dijumlah dari SEMUA
+  // kegiatan yang menyentuh bulan tsb.
   // =========================================================
 
-  const accumulatedHonorBySobatPeriode = useMemo(() => {
+  // Honor tiap kegiatan dibagi RATA ke setiap bulan yang dicakupnya.
+  // Kegiatan 3 bulan dengan hak honor 900.000 -> 300.000 disumbangkan ke
+  // akumulasi limit tiap-tiap dari 3 bulan tsb, BUKAN 900.000 penuh di 1 bulan.
+  const accumulatedHonorBySobatBulan = useMemo(() => {
     const map: Record<string, number> = {};
 
     rawData.forEach((item) => {
-      const periode = item.kegiatan?.bulan_kegiatan || '';
-      if (!item.sobat_id || !periode) return;
+      if (!item.sobat_id) return;
+      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      if (months.length === 0) return;
 
-      const key = `${item.sobat_id}__${periode}`;
-
-      map[key] =
-        (map[key] || 0) +
-        (Number(item.total_honor) || 0);
+      const honorPerBulan = (Number(item.total_honor) || 0) / jumlahBulan;
+      months.forEach((bulan) => {
+        const key = `${item.sobat_id}__${bulan}`;
+        map[key] = (map[key] || 0) + honorPerBulan;
+      });
     });
 
     return map;
   }, [rawData]);
 
   // =========================================================
-  // SUSUN DATA LAPORAN
+  // SUSUN DATA LAPORAN — DIGABUNG PER MITRA + BULAN
   //
-  // PERUBAHAN UTAMA:
+  // Sebelumnya: satu baris per (kegiatan, bulan) — jadi mitra yang
+  // mengikuti 2 kegiatan pada bulan yang sama muncul sebagai 2 baris
+  // terpisah, padahal limitnya memang dihitung gabungan.
   //
-  // 1. `terpakai` sekarang berisi HAK HONOR ALOKASI
-  //    dari penugasan, bukan akumulasi limit.
-  //
-  // 2. `limit` sekarang berisi SISA LIMIT PERIODE:
-  //    maxLimit - totalAllocated
-  //
-  // 3. Status hanya:
-  //    - Mencapai Limit
-  //    - Limit Terlampaui
-  //
-  // 4. Persentase berdasarkan total hak honor alokasi
-  //    terhadap batas maksimal periode.
+  // Sekarang:
+  // 1. Semua kontribusi kegiatan dikelompokkan dulu per (sobat_id, bulan).
+  // 2. Limit dicek SEKALI per kelompok itu, memakai total gabungan
+  //    (accumulatedHonorBySobatBulan — sudah menjumlah semua kegiatan).
+  // 3. Kalau kelompok itu mencapai/melewati limit, HANYA SATU baris yang
+  //    dibuat, berisi daftar kegiatan penyusunnya (kegiatanList) supaya
+  //    rinciannya tetap terlihat.
+  // 4. Mitra yang sama di BULAN BERBEDA tetap jadi kelompok (baris)
+  //    terpisah, karena key kelompoknya adalah sobat_id + bulan.
   // =========================================================
 
   const laporanList: LaporanRow[] = useMemo(() => {
-    return rawData
-      .map((item) => {
-        const periode = item.kegiatan?.bulan_kegiatan || '';
-        const { maxLimit } = getLimitForPeriode(periode);
+    const kontribusiMap: Record<string, KontribusiKegiatan[]> = {};
+    const infoMitraMap: Record<
+      string,
+      { sobatId: string; namaPegawai: string; nikNip: string; bulan: string }
+    > = {};
 
-        const totalAllocated =
-          accumulatedHonorBySobatPeriode[
-            `${item.sobat_id}__${periode}`
-          ] || 0;
+    rawData.forEach((item) => {
+      if (!item.sobat_id) return;
 
-        const hakHonorAlokasi =
-          Number(item.total_honor) || 0;
+      const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      if (periodeInfo.months.length === 0) return;
 
-        // Sama seperti halaman Penugasan:
-        // sisaLimit = maxLimit - totalAllocated
-        //
-        // Untuk laporan, nilai tidak dibuat negatif karena
-        // yang ditampilkan adalah "sisa limit".
-        const sisaLimit = Math.max(
-          maxLimit - totalAllocated,
-          0
-        );
+      const jumlahBulan = periodeInfo.jumlahBulan || 1;
+      const totalHonorKegiatan = Number(item.total_honor) || 0;
+      const honorBulanIni = totalHonorKegiatan / jumlahBulan;
 
-        const usageRatio =
-          maxLimit > 0
-            ? (totalAllocated / maxLimit) * 100
-            : 0;
+      periodeInfo.months.forEach((bulan) => {
+        const key = `${item.sobat_id}__${bulan}`;
 
-        // Persentase boleh dihitung >100 secara internal,
-        // tetapi tampilan dibatasi maksimal 100%.
-        const presentase = Math.min(
-          Math.round(usageRatio),
-          100
-        );
+        if (!kontribusiMap[key]) kontribusiMap[key] = [];
+        kontribusiMap[key].push({
+          kegiatanId: item.kegiatan?.id || item.kegiatan_id,
+          namaKegiatan: item.kegiatan?.nama_kegiatan || '-',
+          honorBulanIni,
+          totalHonorKegiatan,
+          jumlahBulanKegiatan: jumlahBulan,
+          periodeAsliKegiatan: periodeInfo.label,
+        });
 
-        const status: StatusLimit =
-          usageRatio >= 100
-            ? 'Limit Terlampaui'
-            : 'Mencapai Limit';
-
-        return {
-          id: item.id,
-          sobatId: item.sobat_id,
-          namaPegawai: item.mitra?.nama_mitra || '-',
-          nikNip: item.mitra?.sobat_id || item.sobat_id,
-          kegiatanId:
-            item.kegiatan?.id || item.kegiatan_id,
-          namaKegiatan:
-            item.kegiatan?.nama_kegiatan || '-',
-          periode,
-          terpakai: hakHonorAlokasi,
-          limit: sisaLimit,
-          totalAllocated,
-          maxLimit,
-          presentase,
-          status,
-        };
-      })
-      // HANYA data yang mencapai / melewati limit.
-      .filter((row) => {
-        const usageRatio =
-          row.maxLimit > 0
-            ? (row.totalAllocated / row.maxLimit) * 100
-            : 0;
-
-        return usageRatio >= 100;
+        if (!infoMitraMap[key]) {
+          infoMitraMap[key] = {
+            sobatId: item.sobat_id,
+            namaPegawai: item.mitra?.nama_mitra || '-',
+            nikNip: item.mitra?.sobat_id || item.sobat_id,
+            bulan,
+          };
+        }
       });
-  }, [
-    rawData,
-    accumulatedHonorBySobatPeriode,
-    getLimitForPeriode,
-  ]);
+    });
+
+    const rows: LaporanRow[] = [];
+
+    Object.keys(kontribusiMap).forEach((key) => {
+      const info = infoMitraMap[key];
+      if (!info) return;
+
+      const { maxLimit } = getLimitForPeriode(info.bulan);
+      const totalAllocated = accumulatedHonorBySobatBulan[key] || 0;
+      const usageRatio = maxLimit > 0 ? (totalAllocated / maxLimit) * 100 : 0;
+
+      // HANYA kelompok (mitra + bulan) yang mencapai / melewati limit.
+      if (usageRatio < 100) return;
+
+      const sisaLimit = Math.max(maxLimit - totalAllocated, 0);
+      const presentase = Math.min(Math.round(usageRatio), 100);
+      const status: StatusLimit = usageRatio > 100 ? 'Limit Terlampaui' : 'Mencapai Limit';
+
+      // Urutkan kegiatan penyusun dari honor terbesar supaya yang paling
+      // signifikan tampil paling atas di tiap baris.
+      const kegiatanList = [...kontribusiMap[key]].sort(
+        (a, b) => b.honorBulanIni - a.honorBulanIni
+      );
+
+      rows.push({
+        id: key,
+        sobatId: info.sobatId,
+        namaPegawai: info.namaPegawai,
+        nikNip: info.nikNip,
+        periode: info.bulan,
+        kegiatanList,
+        terpakai: totalAllocated,
+        limit: sisaLimit,
+        totalAllocated,
+        maxLimit,
+        presentase,
+        status,
+      });
+    });
+
+    // Urutan tampilan: nama mitra A-Z, lalu berdasarkan urutan bulan.
+    rows.sort((a, b) => {
+      const namaCompare = a.namaPegawai.localeCompare(b.namaPegawai);
+      if (namaCompare !== 0) return namaCompare;
+      return a.periode.localeCompare(b.periode);
+    });
+
+    return rows;
+  }, [rawData, accumulatedHonorBySobatBulan, getLimitForPeriode]);
 
   // =========================================================
   // FILTER
@@ -457,39 +562,26 @@ export default function LaporanPegawaiLimitPage() {
 
   const filteredLaporan = useMemo(() => {
     return laporanList.filter((row) => {
-      const keyword =
-        searchKeyword.trim().toLowerCase();
+      const keyword = searchKeyword.trim().toLowerCase();
 
       const matchSearch =
         !keyword ||
-        row.namaPegawai
-          .toLowerCase()
-          .includes(keyword) ||
-        row.nikNip
-          .toLowerCase()
-          .includes(keyword) ||
-        row.namaKegiatan
-          .toLowerCase()
-          .includes(keyword) ||
-        row.sobatId
-          .toLowerCase()
-          .includes(keyword);
+        row.namaPegawai.toLowerCase().includes(keyword) ||
+        row.nikNip.toLowerCase().includes(keyword) ||
+        row.sobatId.toLowerCase().includes(keyword) ||
+        row.kegiatanList.some((k) => k.namaKegiatan.toLowerCase().includes(keyword));
 
       let matchBulan = true;
 
       if (bulanFilter !== 'Semua Bulan') {
-        const monthNumber =
-          BULAN_NUMBER[bulanFilter];
-
-        matchBulan = isMatchingMonth(
-          row.periode,
-          `2026-${monthNumber}`
-        );
+        // row.periode sudah berupa bulan spesifik (mis. "September 2026"),
+        // jadi cukup dicocokkan langsung ke nama bulan yang dipilih.
+        matchBulan = row.periode.toLowerCase().startsWith(bulanFilter.toLowerCase());
       }
 
       const matchKegiatan =
         kegiatanFilter === 'Semua Kegiatan' ||
-        row.namaKegiatan === kegiatanFilter;
+        row.kegiatanList.some((k) => k.namaKegiatan === kegiatanFilter);
 
       const matchStatus =
         statusFilter === 'Semua' ||
@@ -508,7 +600,6 @@ export default function LaporanPegawaiLimitPage() {
     bulanFilter,
     kegiatanFilter,
     statusFilter,
-    isMatchingMonth,
   ]);
 
   // =========================================================
@@ -564,19 +655,21 @@ export default function LaporanPegawaiLimitPage() {
             row.namaPegawai,
           'SOBAT ID / NIK/NIP':
             row.nikNip,
-          Kegiatan: row.namaKegiatan,
+          Kegiatan: row.kegiatanList
+            .map((k) => k.namaKegiatan)
+            .join(', '),
+          'Rincian Honor per Kegiatan': row.kegiatanList
+            .map((k) => `${k.namaKegiatan}: ${formatRupiah(k.honorBulanIni)}`)
+            .join('; '),
           Periode: row.periode,
 
           // Sesuai permintaan:
-          'Hak Honor Alokasi':
+          'Hak Honor Alokasi (Gabungan)':
             row.terpakai,
 
           // Sesuai permintaan:
           'Sisa Limit Periode':
             row.limit,
-
-          'Total Alokasi Periode':
-            row.totalAllocated,
 
           'Batas Limit Periode':
             row.maxLimit,
@@ -596,10 +689,10 @@ export default function LaporanPegawaiLimitPage() {
         { wch: 28 },
         { wch: 20 },
         { wch: 32 },
+        { wch: 40 },
         { wch: 16 },
-        { wch: 20 },
         { wch: 22 },
-        { wch: 24 },
+        { wch: 20 },
         { wch: 22 },
         { wch: 15 },
         { wch: 20 },
@@ -712,10 +805,12 @@ export default function LaporanPegawaiLimitPage() {
           index + 1,
           row.namaPegawai,
           row.nikNip,
-          row.namaKegiatan,
+          // Multi-kegiatan ditulis satu per baris dalam sel yang sama
+          // (jsPDF autotable otomatis melebarkan tinggi baris untuk '\n').
+          row.kegiatanList.map((k) => k.namaKegiatan).join('\n'),
           row.periode,
 
-          // Hak Honor Alokasi
+          // Hak Honor Alokasi (gabungan semua kegiatan pada bulan ini)
           formatRupiah(row.terpakai),
 
           // Sisa Limit Periode
@@ -764,10 +859,10 @@ export default function LaporanPegawaiLimitPage() {
           halign: 'center',
         },
         1: {
-          cellWidth: 42,
+          cellWidth: 40,
         },
         2: {
-          cellWidth: 32,
+          cellWidth: 30,
         },
         3: {
           cellWidth: 55,
@@ -832,7 +927,7 @@ export default function LaporanPegawaiLimitPage() {
                 </h1>
 
                 <p className="text-xs text-slate-500">
-                  Menampilkan hanya mitra/pegawai yang telah mencapai atau melewati limit honor periode
+                  Menampilkan hanya mitra/pegawai yang telah mencapai atau melewati limit honor periode — digabung satu baris per mitra per bulan
                 </p>
               </div>
 
@@ -1046,9 +1141,9 @@ export default function LaporanPegawaiLimitPage() {
                   <strong>
                     {totalItems}
                   </strong>{' '}
-                  data mitra/pegawai yang
+                  mitra/pegawai (per periode bulan) yang
                   sudah mencapai atau
-                  melewati limit periode.
+                  melewati limit — sudah digabung per mitra per bulan.
                 </div>
               )}
 
@@ -1142,45 +1237,63 @@ export default function LaporanPegawaiLimitPage() {
                                 1}
                             </td>
 
-                            <td className="py-3.5 px-4 font-semibold text-blue-600">
+                            <td className="py-3.5 px-4 font-semibold text-blue-600 align-top">
                               {
                                 row.namaPegawai
                               }
                             </td>
 
-                            <td className="py-3.5 px-4 text-blue-500 font-mono">
+                            <td className="py-3.5 px-4 text-blue-500 font-mono align-top">
                               {
                                 row.nikNip
                               }
                             </td>
 
-                            <td className="py-3.5 px-4 text-blue-500">
-                              <Link
-                                href={`/kegiatan/${row.kegiatanId}`}
-                                className="hover:underline"
-                              >
-                                {
-                                  row.namaKegiatan
-                                }
-                              </Link>
+                            {/* KEGIATAN — bisa lebih dari satu, satu mitra
+                                bisa punya beberapa kegiatan yang sama-sama
+                                menyentuh bulan ini. Tiap kegiatan ditampilkan
+                                dengan porsi honornya masing-masing supaya
+                                rinciannya tetap terlihat meski sudah digabung
+                                jadi satu baris. */}
+                            <td className="py-3.5 px-4 align-top">
+                              <div className="space-y-1.5">
+                                {row.kegiatanList.map((k, i) => (
+                                  <div key={`${k.kegiatanId}-${i}`} className="text-[11.5px] leading-tight">
+                                    <Link
+                                      href={`/kegiatan/${k.kegiatanId}`}
+                                      className="font-medium text-blue-500 hover:underline"
+                                    >
+                                      {k.namaKegiatan}
+                                    </Link>
+                                    <span className="text-slate-500"> — {formatRupiah(k.honorBulanIni)}</span>
+                                    {k.jumlahBulanKegiatan > 1 && (
+                                      <div className="text-[10px] text-slate-400">
+                                        bagian dari {k.periodeAsliKegiatan}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
                             </td>
 
-                            <td className="py-3.5 px-4 text-slate-600">
-                              {
-                                row.periode
-                              }
+                            <td className="py-3.5 px-4 text-slate-600 align-top">
+                              {row.periode}
                             </td>
 
-                            {/* HAK HONOR ALOKASI */}
-                            <td className="py-3.5 px-4 text-right font-semibold text-blue-600">
-                              {formatRupiah(
-                                row.terpakai
+                            {/* HAK HONOR ALOKASI — total gabungan semua
+                                kegiatan pada bulan ini */}
+                            <td className="py-3.5 px-4 text-right font-semibold text-blue-600 align-top">
+                              {formatRupiah(row.terpakai)}
+                              {row.kegiatanList.length > 1 && (
+                                <div className="text-[10px] font-normal text-slate-400">
+                                  gabungan {row.kegiatanList.length} kegiatan
+                                </div>
                               )}
                             </td>
 
                             {/* SISA LIMIT PERIODE */}
                             <td
-                              className={`py-3.5 px-4 text-right font-semibold ${
+                              className={`py-3.5 px-4 text-right font-semibold align-top ${
                                 row.limit <=
                                 0
                                   ? 'text-rose-600'
@@ -1194,7 +1307,7 @@ export default function LaporanPegawaiLimitPage() {
 
                             {/* PERSENTASE */}
                             <td
-                              className={`py-3.5 px-4 text-right font-semibold ${presentaseColor(
+                              className={`py-3.5 px-4 text-right font-semibold align-top ${presentaseColor(
                                 row.status
                               )}`}
                             >
@@ -1202,7 +1315,7 @@ export default function LaporanPegawaiLimitPage() {
                               %
                             </td>
 
-                            <td className="py-3.5 px-4 text-center">
+                            <td className="py-3.5 px-4 text-center align-top">
                               {statusBadge(
                                 row.status
                               )}
