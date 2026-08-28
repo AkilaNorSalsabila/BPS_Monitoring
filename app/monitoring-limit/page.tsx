@@ -26,7 +26,13 @@ interface KegiatanOption {
   nama_kegiatan: string;
 }
 
-// Pemetaan Nama Bulan Indonesia ke Angka
+const NAMA_BULAN_ID = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+];
+
+// Pemetaan Nama Bulan Indonesia ke Angka (dipakai untuk limit_honor.bulan_periode
+// yang formatnya "YYYY-MM", BUKAN untuk parsing rentang kegiatan)
 const BULAN_MAP: Record<string, string> = {
   '01': 'januari',
   '02': 'februari',
@@ -40,6 +46,105 @@ const BULAN_MAP: Record<string, string> = {
   '10': 'oktober',
   '11': 'november',
   '12': 'desember',
+};
+
+// ============================================================
+// PARSER PERIODE KEGIATAN MULTI-BULAN
+// ============================================================
+// Kolom kegiatan.bulan_kegiatan bisa berupa beberapa format tergantung
+// dari mana kegiatan itu dibuat:
+//   1) Rentang (format Kegiatan/Mitra terbaru) : "Agustus 2026 s.d. Oktober 2026 (3 Bulan)"
+//   2) Rentang (format lama)                   : "Agustus 2026 - Oktober 2026"
+//   3) Bulan tunggal                           : "Agustus 2026 (1 Bulan)"
+//   4) Bulan tunggal polos (fallback lama)      : "Agustus 2026"
+// Semua format ini diurai menjadi daftar bulan individual, supaya:
+//  - kegiatan yang membentang beberapa bulan tetap terhitung di SETIAP
+//    bulan yang dicakupnya (bukan cuma bulan yang namanya tertulis literal), dan
+//  - honornya dibagi rata per bulan sebelum diakumulasikan ke limit bulanan
+//    (supaya tidak dobel-hitung seperti sebelumnya).
+// Logika ini identik dengan parser yang dipakai di halaman Penugasan.
+
+interface PeriodeKegiatan {
+  months: string[]; // mis. ["Agustus 2026", "September 2026", "Oktober 2026"]
+  jumlahBulan: number;
+}
+
+const monthIndexFromName = (name: string): number =>
+  NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
+
+const generateMonthSequence = (startMonthIdx: number, startYear: number, count: number): string[] => {
+  const result: string[] = [];
+  let idx = startMonthIdx;
+  let year = startYear;
+  for (let i = 0; i < count; i++) {
+    result.push(`${NAMA_BULAN_ID[idx]} ${year}`);
+    idx++;
+    if (idx > 11) {
+      idx = 0;
+      year++;
+    }
+  }
+  return result;
+};
+
+// Mendukung pemisah "-" (format lama) maupun "s.d." (format baru), dengan
+// atau tanpa keterangan "(N Bulan)" di akhir.
+const RANGE_REGEX =
+  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*(?:-|s\.?d\.?)\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*(?:\(\s*\d+\s*Bulan\s*\))?$/i;
+
+// Mendukung "Agustus 2026 (1 Bulan)" maupun "Agustus 2026" polos (tanpa keterangan).
+const SINGLE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*(?:\(\s*(\d+)\s*Bulan\s*\))?$/i;
+
+const parsePeriodeKegiatan = (raw: string | null | undefined): PeriodeKegiatan => {
+  const text = (raw || '').trim();
+  if (!text) return { months: [], jumlahBulan: 0 };
+
+  const rangeMatch = text.match(RANGE_REGEX);
+  if (rangeMatch) {
+    const [, startName, startYearStr, endName, endYearStr] = rangeMatch;
+    const startIdx = monthIndexFromName(startName);
+    const endIdx = monthIndexFromName(endName);
+    const startYear = parseInt(startYearStr, 10);
+    const endYear = parseInt(endYearStr, 10);
+
+    if (startIdx !== -1 && endIdx !== -1) {
+      const totalBulan = (endYear - startYear) * 12 + (endIdx - startIdx) + 1;
+      if (totalBulan > 0 && totalBulan <= 36) {
+        return {
+          months: generateMonthSequence(startIdx, startYear, totalBulan),
+          jumlahBulan: totalBulan,
+        };
+      }
+    }
+  }
+
+  const singleMatch = text.match(SINGLE_REGEX);
+  if (singleMatch) {
+    const [, monthName, yearStr, jumlahStr] = singleMatch;
+    const startIdx = monthIndexFromName(monthName);
+
+    if (startIdx !== -1) {
+      const jumlah = Math.max(parseInt(jumlahStr || '1', 10) || 1, 1);
+      return {
+        months: generateMonthSequence(startIdx, parseInt(yearStr, 10), jumlah),
+        jumlahBulan: jumlah,
+      };
+    }
+  }
+
+  // Fallback: format tidak dikenali -> anggap 1 bulan apa adanya supaya
+  // tidak error, tapi tidak dianggap cocok dengan bulan manapun secara
+  // spesifik (label mentahnya disimpan sebagai satu "bulan" tersendiri).
+  return { months: [text], jumlahBulan: 1 };
+};
+
+// Mengubah nilai filter "YYYY-MM" (dari <input type="month">) menjadi label
+// "Nama Bulan Tahun" (mis. "2026-09" -> "September 2026") supaya bisa
+// dicocokkan langsung terhadap hasil parsePeriodeKegiatan(...).months.
+const periodeBulanToLabel = (yyyymm: string): string => {
+  const [year, monthNum] = yyyymm.split('-');
+  const monthName = NAMA_BULAN_ID[parseInt(monthNum, 10) - 1] || '';
+  return `${monthName} ${year}`;
 };
 
 export default function MonitoringLimitPage() {
@@ -85,6 +190,9 @@ export default function MonitoringLimitPage() {
     fetchKegiatanOptions();
   }, []);
 
+  // Dipakai KHUSUS untuk mencocokkan limit_honor.bulan_periode (format
+  // tunggal "YYYY-MM") terhadap filter yang dipilih. Ini BUKAN untuk
+  // mencocokkan rentang kegiatan mitra — untuk itu pakai parsePeriodeKegiatan.
   const isMatchingMonth = (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
     if (!rawDbValue) return false;
     if (!filterYYYYMM) return true;
@@ -144,22 +252,45 @@ export default function MonitoringLimitPage() {
       setLimitBulanan(limitAktif);
       setLimitSudahDiatur(sudahDiatur);
 
+      // Label bulan yang sedang difilter, mis. "September 2026" — dicocokkan
+      // terhadap daftar bulan hasil pengurai rentang periode tiap kegiatan.
+      const targetBulanLabel = periodeBulanToLabel(periodeBulan);
+
       const computedList: MonitoringLimitData[] = (mitraData || [])
         .map((mitra) => {
-          const penugasanMitra = (penugasanData || []).filter((p: any) => {
-            if (p.sobat_id !== mitra.sobat_id) return false;
-            const bulanTarget = p.kegiatan?.bulan_kegiatan || p.bulan_pembayaran;
-            return isMatchingMonth(bulanTarget, periodeBulan);
-          });
-
-          const totalHonor = penugasanMitra.reduce(
-            (sum, p: any) => sum + (Number(p.total_honor) || 0),
-            0
+          const penugasanMitra = (penugasanData || []).filter(
+            (p: any) => p.sobat_id === mitra.sobat_id
           );
 
-          const kegiatanList = penugasanMitra
-            .map((p: any) => p.kegiatan?.nama_kegiatan)
-            .filter(Boolean);
+          let totalHonor = 0;
+          const kegiatanSet = new Set<string>();
+
+          penugasanMitra.forEach((p: any) => {
+            const bulanTarget = p.kegiatan?.bulan_kegiatan || p.bulan_pembayaran;
+            const periodeInfo = parsePeriodeKegiatan(bulanTarget);
+
+            // Kegiatan ini dihitung untuk periode yang difilter HANYA jika
+            // rentang bulannya benar-benar mencakup bulan tsb — termasuk
+            // bulan "tengah" yang tidak disebut literal di teksnya
+            // (mis. September pada rentang Agustus-Oktober).
+            if (!periodeInfo.months.includes(targetBulanLabel)) return;
+
+            // Honor dibagi rata ke tiap bulan yang dicakup kegiatan, supaya
+            // kegiatan 3 bulan senilai Rp900rb menyumbang Rp300rb/bulan —
+            // bukan Rp900rb penuh di setiap bulan yang ia sentuh.
+            const honorPerBulan =
+              (Number(p.total_honor) || 0) / Math.max(periodeInfo.jumlahBulan, 1);
+
+            totalHonor += honorPerBulan;
+
+            if (p.kegiatan?.nama_kegiatan) {
+              kegiatanSet.add(p.kegiatan.nama_kegiatan);
+            }
+          });
+
+          totalHonor = Math.round(totalHonor);
+
+          const kegiatanList = Array.from(kegiatanSet);
 
           const sisa = Math.max(limitAktif - totalHonor, 0);
           const persen = limitAktif > 0 ? Math.round((totalHonor / limitAktif) * 100) : 0;
@@ -171,9 +302,7 @@ export default function MonitoringLimitPage() {
             total_honor_terpakai: totalHonor,
             sisa_limit: sisa,
             persentase: persen,
-            kegiatan_diikuti: kegiatanList.length > 0 
-              ? Array.from(new Set(kegiatanList))
-              : [],
+            kegiatan_diikuti: kegiatanList,
           };
         })
         .filter((mitra) => mitra.kegiatan_diikuti.length > 0);

@@ -542,9 +542,21 @@ export default function PenugasanPage() {
       }
 
       if (bulanFilter !== 'Semua Bulan') {
-        filteredData = filteredData.filter((item) =>
-          item.kegiatan?.bulan_kegiatan?.toLowerCase().includes(bulanFilter.toLowerCase())
-        );
+        // Sebelumnya ini hanya mengecek apakah nama bulan TERTULIS LITERAL
+        // di teks periode (mis. substring "September" pada "Agustus 2026
+        // s.d. Oktober 2026"), sehingga kegiatan yang membentang lebih dari
+        // 1 bulan tidak pernah cocok untuk bulan "tengah" yang tidak
+        // disebut eksplisit di teksnya. Sekarang periode diurai dulu
+        // menjadi daftar bulan individual (parseBulanKegiatan — parser
+        // yang sama dipakai untuk hitung limit bulanan), baru dicocokkan
+        // bulan per bulan terhadap bulan yang dipilih di filter.
+        filteredData = filteredData.filter((item) => {
+          const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+          return periodeInfo.months.some((bulanLengkap) => {
+            const namaBulanSaja = bulanLengkap.split(' ')[0] || '';
+            return namaBulanSaja.toLowerCase() === bulanFilter.toLowerCase();
+          });
+        });
       }
 
       if (kegiatanFilter !== 'Semua Kegiatan') {
