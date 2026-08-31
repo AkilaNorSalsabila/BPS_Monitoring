@@ -1756,7 +1756,24 @@ export default function PenugasanPage() {
                                           className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
                                           title="Hapus"
                                         >
-                                          🗑️
+                                          {/* Ikon SVG disamakan persis dengan tombol hapus di halaman Mitra */}
+                                          <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="14"
+                                            height="14"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M3 6h18" />
+                                            <path d="M8 6V4h8v2" />
+                                            <path d="M19 6l-1 14H6L5 6" />
+                                            <path d="M10 11v5" />
+                                            <path d="M14 11v5" />
+                                          </svg>
                                         </button>
                                       </div>
                                     </td>

@@ -38,8 +38,8 @@ export default function EmployeeLimitTable({ data, loading }: EmployeeLimitTable
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="mb-3">
-        <h2 className="text-sm font-bold text-slate-800">Pegawai Mendekati / Sudah Limit</h2>
-        <p className="text-[11px] text-slate-500">Pegawai/mitra yang perlu diperhatikan pada periode berjalan</p>
+        <h2 className="text-sm font-bold text-slate-800">Mitra Mendekati / Sudah Limit</h2>
+        <p className="text-[11px] text-slate-500">Mitra yang perlu diperhatikan pada periode berjalan</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -63,7 +63,7 @@ export default function EmployeeLimitTable({ data, loading }: EmployeeLimitTable
             ) : data.length === 0 ? (
               <tr>
                 <td colSpan={5} className="py-6 text-center text-slate-400">
-                  Tidak ada pegawai yang mendekati atau melebihi limit saat ini.
+                  Tidak ada Mitra yang mendekati atau melebihi limit saat ini.
                 </td>
               </tr>
             ) : (
