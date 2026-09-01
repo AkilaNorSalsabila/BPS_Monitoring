@@ -7,6 +7,10 @@ import Sidebar from '@/components/layout/Sidebar';
 import StatsCard from '@/components/dashboard/StatsCard';
 import DisbursementChart, { DisbursementDataPoint } from '@/components/dashboard/DisbursementChart';
 import EmployeeLimitTable, { EmployeeLimitRow, StatusLimit } from '@/components/dashboard/EmployeeLimitTable';
+import WorkDistributionSection, {
+  WorkDistributionAssignment,
+  WorkDistributionMitra,
+} from '@/components/dashboard/WorkDistributionSection';
 
 // =========================================================
 // SUPABASE
@@ -418,6 +422,51 @@ export default function DashboardPage() {
     return rows.sort((a, b) => b.presentase - a.presentase);
   }, [mitraList, accumulatedBySobatPeriode, periodeBulan, getLimitForPeriode]);
 
+  /* ============================================
+     PEMERATAAN PENUGASAN
+     Berbeda dari statistik limit di atas (yang terikat SATU bulan lewat
+     dropdown Periode), section ini butuh rentang yang lebih panjang supaya
+     bermakna — kalau dikunci per-bulan, hampir semua mitra cuma tampil 0
+     atau 1 kegiatan. Karena itu data yang dikirim ke komponennya masih
+     MENTAH per-assignment (lengkap dengan daftar bulan yang dicakup),
+     supaya komponen bisa menghitung ulang sendiri sesuai toggle scope-nya
+     ("Sepanjang Waktu" vs "Tahun Ini") tanpa balik nge-fetch ke server.
+  ============================================ */
+  const mitraForDistribution: WorkDistributionMitra[] = useMemo(
+    () => mitraList.map((m) => ({ sobatId: m.sobat_id, namaMitra: m.nama_mitra })),
+    [mitraList]
+  );
+
+  const mitraNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    mitraList.forEach((m) => {
+      map[m.sobat_id] = m.nama_mitra;
+    });
+    return map;
+  }, [mitraList]);
+
+  const workDistributionAssignments: WorkDistributionAssignment[] = useMemo(() => {
+    return penugasanList
+      .filter((item) => item.sobat_id)
+      .map((item) => {
+        const { months } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+        return {
+          sobatId: item.sobat_id,
+          namaMitra: mitraNameMap[item.sobat_id] || item.sobat_id,
+          totalHonor: Number(item.total_honor) || 0,
+          months,
+        };
+      });
+  }, [penugasanList, mitraNameMap]);
+
+  // Tahun aktif diambil dari periode yang sedang dipilih di dropdown atas
+  // (mis. "Agustus 2026" -> "2026"), dipakai sebagai label & filter untuk
+  // toggle "Tahun Ini" di section pemerataan.
+  const tahunAktif = useMemo(() => {
+    const parts = periodeBulan.trim().split(/\s+/);
+    return parts[1] || String(new Date().getFullYear());
+  }, [periodeBulan]);
+
   const formatRupiah = (val: number) =>
     new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val);
 
@@ -481,6 +530,18 @@ export default function DashboardPage() {
               <DisbursementChart data={disbursementData} loading={loading} />
               <EmployeeLimitTable data={employeeLimitRows} loading={loading} />
             </section>
+
+            {/* PEMERATAAN PENUGASAN — siapa paling sering / belum pernah
+                dapat kegiatan. Punya toggle scope sendiri (Sepanjang Waktu /
+                Tahun Ini), sengaja TIDAK ikut dropdown Periode bulanan di
+                atas karena tujuannya beda: pemerataan beban kerja jangka
+                panjang, bukan status limit honor bulan berjalan. */}
+            <WorkDistributionSection
+              mitraList={mitraForDistribution}
+              assignments={workDistributionAssignments}
+              tahunAktif={tahunAktif}
+              loading={loading}
+            />
           </div>
         </main>
       </div>
