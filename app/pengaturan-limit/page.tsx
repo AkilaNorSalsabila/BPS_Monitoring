@@ -29,12 +29,80 @@ interface MitraLimitRow {
   sisa: number;
   persen_terpakai: number;
   status: 'aman' | 'peringatan' | 'mencapai' | 'melebihi';
+  // Rincian kegiatan penyusun alokasi bulan ini, supaya kelihatan kalau
+  // alokasi mitra tsb berasal dari gabungan beberapa kegiatan sekaligus
+  // (dan mana yang membentang lebih dari 1 bulan).
+  rincianKegiatan: {
+    namaKegiatan: string;
+    honorBulanIni: number;
+    totalHonorKegiatan: number;
+    jumlahBulanKegiatan: number;
+  }[];
 }
 
 const BULAN_OPTIONS = [
   'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
 ];
+
+// =====================================================
+// PARSER PERIODE KEGIATAN MULTI-BULAN
+// =====================================================
+const NAMA_BULAN_ID = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+];
+
+const monthIndexFromName = (name: string): number =>
+  NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
+
+const generateMonthSequence = (startMonthIdx: number, startYear: number, count: number): string[] => {
+  const result: string[] = [];
+  let idx = startMonthIdx;
+  let year = startYear;
+  for (let i = 0; i < count; i++) {
+    result.push(`${NAMA_BULAN_ID[idx]} ${year}`);
+    idx++;
+    if (idx > 11) {
+      idx = 0;
+      year++;
+    }
+  }
+  return result;
+};
+
+const MONTH_YEAR_REGEX = /([A-Za-zÀ-ÿ]+)\s+(\d{4})/g;
+
+interface PeriodeKegiatan {
+  months: string[];
+  jumlahBulan: number;
+}
+
+function parseBulanKegiatan(raw: string | null | undefined): PeriodeKegiatan {
+  const text = (raw || '').trim();
+  if (!text) return { months: [], jumlahBulan: 0 };
+
+  const matches = [...text.matchAll(MONTH_YEAR_REGEX)]
+    .map((m) => ({ idx: monthIndexFromName(m[1]), year: parseInt(m[2], 10) }))
+    .filter((m) => m.idx !== -1);
+
+  if (matches.length >= 2) {
+    const start = matches[0];
+    const end = matches[matches.length - 1];
+    const totalBulan = (end.year - start.year) * 12 + (end.idx - start.idx) + 1;
+    if (totalBulan > 0 && totalBulan <= 36) {
+      return { months: generateMonthSequence(start.idx, start.year, totalBulan), jumlahBulan: totalBulan };
+    }
+  }
+
+  if (matches.length === 1) {
+    const bulanCountMatch = text.match(/\(?\s*(\d+)\s*bulan\s*\)?/i);
+    const jumlah = bulanCountMatch ? Math.max(parseInt(bulanCountMatch[1], 10) || 1, 1) : 1;
+    return { months: generateMonthSequence(matches[0].idx, matches[0].year, jumlah), jumlahBulan: jumlah };
+  }
+
+  return { months: [text], jumlahBulan: 1 };
+}
 
 // =====================================================
 // PAGE
@@ -46,7 +114,9 @@ export default function PengaturanLimitPage() {
   // =====================================================
   // STATE BULAN & TAHUN (PER BULAN)
   // =====================================================
-  const [selectedBulanNama, setSelectedBulanNama] = useState<string>('Januari');
+  const [selectedBulanNama, setSelectedBulanNama] = useState<string>(
+    BULAN_OPTIONS[new Date().getMonth()]
+  );
   const [selectedTahun, setSelectedTahun] = useState<string>(new Date().getFullYear().toString());
 
   // Gabungan string filter aktif, misal: "Januari 2026"
@@ -77,17 +147,30 @@ export default function PengaturanLimitPage() {
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [formData, setFormData] = useState({
-    batas_maksimal: 3000000,
+    batas_maksimal_str: '3.000.000',
     persen_peringatan: 80,
   });
 
-  // Format Rupiah
+  // Format Rupiah untuk Tabel & Ringkasan
   const formatRupiah = (val: number) => {
     return new Intl.NumberFormat('id-ID', {
       style: 'currency',
       currency: 'IDR',
       maximumFractionDigits: 0,
     }).format(val);
+  };
+
+  // Helper untuk memformat input angka ke string dengan titik ribuan (misal: 3000000 -> 3.000.000)
+  const formatNumberInput = (val: string) => {
+    const numbers = val.replace(/\D/g, '');
+    if (!numbers) return '';
+    return new Intl.NumberFormat('id-ID').format(Number(numbers));
+  };
+
+  // Helper untuk mengurai string input kembali ke number murni
+  const parseNumberInput = (val: string) => {
+    const numbers = val.replace(/\D/g, '');
+    return numbers ? Number(numbers) : 0;
   };
 
   // =====================================================
@@ -105,7 +188,6 @@ export default function PengaturanLimitPage() {
         if (item.bulan_kegiatan) {
           BULAN_OPTIONS.forEach((bln) => {
             if (item.bulan_kegiatan.includes(bln)) {
-              // Ambil 4 digit angka terakhir atau regex tahun
               const matchYear = item.bulan_kegiatan.match(/\b20\d{2}\b/g);
               if (matchYear) {
                 matchYear.forEach((y) => yearsSet.add(y));
@@ -168,13 +250,13 @@ export default function PengaturanLimitPage() {
       const batasMaksimal = Number(limitInfo?.batas_maksimal || 0);
       const persenPeringatan = Number(limitInfo?.persen_peringatan || 80);
 
-      // Ambil penugasan yang mencakup bulan terpilih (misal: memuat nama bulan tersebut di kolom bulan_kegiatan)
       const { data: penugasanData, error: errPenugasan } = await supabase
         .from('penugasan')
         .select(`
           id,
           sobat_id,
           total_honor,
+          jumlah_dicairkan,
           kegiatan!inner (
             id,
             nama_kegiatan,
@@ -184,52 +266,54 @@ export default function PengaturanLimitPage() {
             sobat_id,
             nama_mitra
           )
-        `)
-        .ilike('kegiatan.bulan_kegiatan', `%${selectedBulanPeriode}%`);
+        `);
 
       if (errPenugasan) throw errPenugasan;
 
-      const alokasiMap: Record<string, { nama_mitra: string; total: number }> = {};
-      const penugasanIdToSobat: Record<number, string> = {};
+      const alokasiMap: Record<
+        string,
+        {
+          nama_mitra: string;
+          total: number;
+          dicairkan: number;
+          rincian: MitraLimitRow['rincianKegiatan'];
+        }
+      > = {};
 
       (penugasanData || []).forEach((item: any) => {
         const dataMitra = Array.isArray(item.mitra) ? item.mitra[0] : item.mitra;
+        const dataKegiatan = Array.isArray(item.kegiatan) ? item.kegiatan[0] : item.kegiatan;
+
         const sobatId = dataMitra?.sobat_id || item.sobat_id;
         const namaMitra = dataMitra?.nama_mitra || 'Tanpa Nama';
 
         if (!sobatId) return;
 
+        const periodeInfo = parseBulanKegiatan(dataKegiatan?.bulan_kegiatan);
+        if (!periodeInfo.months.includes(selectedBulanPeriode)) return;
+
+        const jumlahBulan = periodeInfo.jumlahBulan || 1;
+        const totalHonorKegiatan = Number(item.total_honor) || 0;
+        const totalDicairkanKegiatan = Number(item.jumlah_dicairkan) || 0;
+
+        const honorBulanIni = totalHonorKegiatan / jumlahBulan;
+        const dicairkanBulanIni = totalDicairkanKegiatan / jumlahBulan;
+
         if (!alokasiMap[sobatId]) {
-          alokasiMap[sobatId] = { nama_mitra: namaMitra, total: 0 };
+          alokasiMap[sobatId] = { nama_mitra: namaMitra, total: 0, dicairkan: 0, rincian: [] };
         }
 
-        const honor = Number(item.total_honor) || 0;
-        alokasiMap[sobatId].total += honor;
-        penugasanIdToSobat[item.id] = sobatId;
+        alokasiMap[sobatId].total += honorBulanIni;
+        alokasiMap[sobatId].dicairkan += dicairkanBulanIni;
+        alokasiMap[sobatId].rincian.push({
+          namaKegiatan: dataKegiatan?.nama_kegiatan || '-',
+          honorBulanIni,
+          totalHonorKegiatan,
+          jumlahBulanKegiatan: jumlahBulan,
+        });
       });
 
-      // Ambil data pencairan berdasarkan penugasan terkait
-      const penugasanIds = Object.keys(penugasanIdToSobat).map(Number);
-      const dicairkanMap: Record<string, number> = {};
-
-      if (penugasanIds.length > 0) {
-        const { data: pencairanData, error: errPencairan } = await supabase
-          .from('pencairan_honor')
-          .select('penugasan_id, nominal_dicairkan')
-          .in('penugasan_id', penugasanIds);
-
-        if (errPencairan) throw errPencairan;
-
-        (pencairanData || []).forEach((p: any) => {
-          const sobatId = penugasanIdToSobat[p.penugasan_id];
-          if (!sobatId) return;
-          const nominal = Number(p.nominal_dicairkan) || 0;
-          dicairkanMap[sobatId] = (dicairkanMap[sobatId] || 0) + nominal;
-        });
-      }
-
       const rows: MitraLimitRow[] = Object.entries(alokasiMap).map(([sobatId, data]) => {
-        const dicairkan = dicairkanMap[sobatId] || 0;
         const persenTerpakai = batasMaksimal > 0 ? (data.total / batasMaksimal) * 100 : 0;
 
         let status: MitraLimitRow['status'] = 'aman';
@@ -249,10 +333,11 @@ export default function PengaturanLimitPage() {
           sobat_id: sobatId,
           nama_mitra: data.nama_mitra,
           alokasi: data.total,
-          dicairkan,
+          dicairkan: data.dicairkan,
           sisa,
           persen_terpakai: persenTerpakai,
           status,
+          rincianKegiatan: data.rincian,
         };
       });
 
@@ -313,8 +398,9 @@ export default function PengaturanLimitPage() {
   // 5. MODAL SIMPAN LIMIT
   // =====================================================
   const handleOpenLimitModal = () => {
+    const currentBatas = limitInfo?.batas_maksimal || 3000000;
     setFormData({
-      batas_maksimal: limitInfo?.batas_maksimal || 3000000,
+      batas_maksimal_str: new Intl.NumberFormat('id-ID').format(currentBatas),
       persen_peringatan: limitInfo?.persen_peringatan || 80,
     });
     setIsModalOpen(true);
@@ -324,7 +410,9 @@ export default function PengaturanLimitPage() {
     e.preventDefault();
     if (!selectedBulanPeriode) return;
 
-    if (Number(formData.batas_maksimal) <= 0) {
+    const numericBatas = parseNumberInput(formData.batas_maksimal_str);
+
+    if (numericBatas <= 0) {
       alert('Batas maksimal harus lebih dari 0.');
       return;
     }
@@ -335,7 +423,7 @@ export default function PengaturanLimitPage() {
         const { error } = await supabase
           .from('limit_honor')
           .update({
-            batas_maksimal: Number(formData.batas_maksimal),
+            batas_maksimal: numericBatas,
             persen_peringatan: Number(formData.persen_peringatan),
           })
           .eq('id', limitInfo.id);
@@ -346,7 +434,7 @@ export default function PengaturanLimitPage() {
         const { error } = await supabase.from('limit_honor').insert([
           {
             bulan_periode: selectedBulanPeriode,
-            batas_maksimal: Number(formData.batas_maksimal),
+            batas_maksimal: numericBatas,
             persen_peringatan: Number(formData.persen_peringatan),
           },
         ]);
@@ -403,7 +491,7 @@ export default function PengaturanLimitPage() {
                   Akumulasi & Limit Honor Mitra (Bulanan)
                 </h1>
                 <p className="text-xs text-slate-500 mt-1">
-                  Menampilkan total gabungan honor mitra dari seluruh kegiatan pada bulan spesifik yang dipilih.
+                  Menampilkan total gabungan honor mitra dari seluruh kegiatan pada bulan spesifik yang dipilih. Kegiatan yang membentang beberapa bulan otomatis dibagi rata per bulan.
                 </p>
               </div>
 
@@ -562,7 +650,19 @@ export default function PengaturanLimitPage() {
                           <td className="py-4 px-6 text-slate-600 font-medium">
                             {limitInfo ? formatRupiah(limitInfo.batas_maksimal) : '-'}
                           </td>
-                          <td className="py-4 px-6 font-bold text-slate-800">{formatRupiah(item.alokasi)}</td>
+                          <td className="py-4 px-6 font-bold text-slate-800">
+                            {formatRupiah(item.alokasi)}
+                            {item.rincianKegiatan.length > 1 && (
+                              <div className="text-[10px] font-normal text-slate-400 mt-0.5">
+                                gabungan {item.rincianKegiatan.length} kegiatan
+                              </div>
+                            )}
+                            {item.rincianKegiatan.length === 1 && item.rincianKegiatan[0].jumlahBulanKegiatan > 1 && (
+                              <div className="text-[10px] font-normal text-slate-400 mt-0.5">
+                                ≈ {formatRupiah(item.rincianKegiatan[0].honorBulanIni)}/bulan dari total {formatRupiah(item.rincianKegiatan[0].totalHonorKegiatan)} ({item.rincianKegiatan[0].jumlahBulanKegiatan} bln)
+                              </div>
+                            )}
+                          </td>
                           <td className="py-4 px-6 text-slate-600 font-medium">{formatRupiah(item.dicairkan)}</td>
                           <td
                             className={`py-4 px-6 font-medium ${
@@ -662,13 +762,21 @@ export default function PengaturanLimitPage() {
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Batas Maksimal Honor Bulanan (Rp) *</label>
                 <input
-                  type="number"
-                  min={1}
-                  value={formData.batas_maksimal}
-                  onChange={(e) => setFormData({ ...formData, batas_maksimal: Number(e.target.value) })}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none focus:border-blue-500 font-semibold text-slate-800"
+                  type="text"
+                  value={formData.batas_maksimal_str}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      batas_maksimal_str: formatNumberInput(e.target.value),
+                    })
+                  }
+                  placeholder="Contoh: 3.000.000"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none focus:border-blue-500 font-medium"
                   required
                 />
+                <span className="text-[10px] text-slate-400 mt-1 block">
+                  Ketik angka saja, titik pemisah ribuan akan ditambahkan otomatis.
+                </span>
               </div>
 
               <div>

@@ -20,7 +20,8 @@ interface KegiatanDetail {
 interface MitraPenugasan {
   id: string;
   nama_mitra: string;
-  limit_bulanan: number | null; // null = belum diatur di tabel limit_honor
+  limit_bulanan: number | null;
+  detail_limit_per_bulan?: { bulan: string; limit: number }[];
   hak_honor: number;
 }
 
@@ -30,6 +31,8 @@ interface RiwayatPencairan {
   catatan?: string;
   bulan_pencairan?: string;
   nominal_dicairkan: number;
+  sobat_id?: string;
+  nama_mitra?: string;
 }
 
 export default function DetailKegiatanPage() {
@@ -47,7 +50,6 @@ export default function DetailKegiatanPage() {
   const [mitraList, setMitraList] = useState<MitraPenugasan[]>([]);
   const [pencairanList, setPencairanList] = useState<RiwayatPencairan[]>([]);
 
-  // Pagination untuk masing-masing tab (independen satu sama lain)
   const [mitraPage, setMitraPage] = useState<number>(1);
   const [riwayatPage, setRiwayatPage] = useState<number>(1);
   const itemsPerPage = 10;
@@ -87,40 +89,99 @@ export default function DetailKegiatanPage() {
         `)
         .eq('kegiatan_id', targetId);
 
+      // Ambil bulan kegiatan dari data lokal hasil fetch
+      let limitBulanIni: number | null = null;
+      let detailLimitPerBulan: { bulan: string; limit: number }[] = [];
+      const bulanKegiatanVal = dataKegiatan?.bulan_kegiatan;
+
+      if (bulanKegiatanVal) {
+        const bulanKegiatanStr = bulanKegiatanVal.toLowerCase();
+
+        const { data: allLimits, error: errAllLimit } = await supabase
+          .from('limit_honor')
+          .select('bulan_periode, batas_maksimal');
+
+        if (!errAllLimit && allLimits) {
+          const daftarBulan = [
+            'januari', 'februari', 'maret', 'april', 'mei', 'juni',
+            'juli', 'agustus', 'september', 'oktober', 'november', 'desember'
+          ];
+
+          if (bulanKegiatanStr.includes('s.d.')) {
+            const parts = bulanKegiatanStr.split('s.d.');
+            const startMonthStr = parts[0]?.trim() || '';
+            const endMonthStr = parts[1]?.trim() || '';
+
+            const startIndex = daftarBulan.findIndex(b => startMonthStr.includes(b));
+            const endIndex = daftarBulan.findIndex(b => endMonthStr.includes(b));
+
+            if (startIndex !== -1 && endIndex !== -1 && startIndex <= endIndex) {
+              const activeMonths = daftarBulan.slice(startIndex, endIndex + 1);
+
+              activeMonths.forEach(mName => {
+                const foundMatch = allLimits.find(item => 
+                  item.bulan_periode && item.bulan_periode.toLowerCase().includes(mName)
+                );
+                if (foundMatch) {
+                  detailLimitPerBulan.push({
+                    bulan: foundMatch.bulan_periode,
+                    limit: Number(foundMatch.batas_maksimal) || 0
+                  });
+                }
+              });
+
+              // Default limitBulanIni diambil dari bulan pertama di rentang jika dibutuhkan untuk tampilan tunggal
+              if (detailLimitPerBulan.length > 0) {
+                limitBulanIni = detailLimitPerBulan[0].limit;
+              }
+            } else {
+              const matchedLimits = allLimits.filter((item) => 
+                item.bulan_periode && bulanKegiatanStr.includes(item.bulan_periode.toLowerCase())
+              );
+              if (matchedLimits.length > 0) {
+                limitBulanIni = Number(matchedLimits[0].batas_maksimal) || 0;
+                detailLimitPerBulan = matchedLimits.map(item => ({
+                  bulan: item.bulan_periode,
+                  limit: Number(item.batas_maksimal) || 0
+                }));
+              }
+            }
+          } else {
+            const found = allLimits.find((item) => 
+              item.bulan_periode && bulanKegiatanStr.includes(item.bulan_periode.toLowerCase())
+            );
+
+            if (found) {
+              limitBulanIni = Number(found.batas_maksimal) || 0;
+              detailLimitPerBulan = [{
+                bulan: found.bulan_periode,
+                limit: limitBulanIni
+              }];
+            }
+          }
+        }
+      }
+
       if (errPenugasan) {
         console.error('Gagal fetch penugasan:', errPenugasan.message);
         setMitraList([]);
         setPencairanList([]);
       } else if (dataPenugasan && dataPenugasan.length > 0) {
-        // 2b. Fetch limit_honor berdasarkan PERIODE (bulan_kegiatan), BUKAN kegiatan_id.
-        // Limit honor bersifat bulanan & berlaku sama untuk semua mitra/kegiatan pada
-        // periode yang sama — ini kunci yang sama dipakai di halaman Pengaturan Limit
-        // dan halaman Penugasan.
-        let limitBulanIni: number | null = null;
-        const periodeKegiatan = dataKegiatan?.bulan_kegiatan?.trim() || '';
+        // Map penugasan_id -> info mitra, dipakai untuk melengkapi riwayat pencairan
+        const mitraByPenugasanId: Record<number, { sobatId: string; namaMitra: string }> = {};
 
-        if (periodeKegiatan) {
-          const { data: limitRow, error: errLimit } = await supabase
-            .from('limit_honor')
-            .select('batas_maksimal')
-            .eq('bulan_periode', periodeKegiatan)
-            .maybeSingle();
-
-          if (errLimit) {
-            console.error('Error fetching limit_honor:', errLimit.message);
-          } else if (limitRow && limitRow.batas_maksimal !== undefined) {
-            limitBulanIni = Number(limitRow.batas_maksimal);
-          }
-        }
-
-        // Format list mitra yang benar-benar ditugaskan
         const formattedMitra: MitraPenugasan[] = dataPenugasan.map((item: any) => {
           const dataMitra = Array.isArray(item.mitra) ? item.mitra[0] : item.mitra;
           const sobatId = dataMitra?.sobat_id || item.sobat_id || String(item.id);
+          const namaMitra = dataMitra?.nama_mitra || 'Tanpa Nama';
+
+          mitraByPenugasanId[item.id] = { sobatId, namaMitra };
+
           return {
             id: sobatId,
-            nama_mitra: dataMitra?.nama_mitra || 'Tanpa Nama',
+            nama_mitra: namaMitra,
             limit_bulanan: limitBulanIni,
+            detail_limit_per_bulan: detailLimitPerBulan,
             hak_honor: Number(item.total_honor) || 0,
           };
         });
@@ -128,13 +189,11 @@ export default function DetailKegiatanPage() {
         setMitraList(formattedMitra);
         setMitraPage(1);
 
-        // Ambil daftar penugasan_id untuk fetching pencairan
         const penugasanIds = dataPenugasan.map((item: any) => item.id);
 
-        // 3. Fetch Pencairan Honor berdasarkan penugasan_id
         const { data: dataPencairan, error: errPencairan } = await supabase
           .from('pencairan_honor')
-          .select('id, tgl_pencairan, catatan, bulan_pencairan, nominal_dicairkan')
+          .select('id, tgl_pencairan, catatan, bulan_pencairan, nominal_dicairkan, penugasan_id, sobat_id')
           .in('penugasan_id', penugasanIds)
           .order('tgl_pencairan', { ascending: false });
 
@@ -142,11 +201,24 @@ export default function DetailKegiatanPage() {
           console.error('Error fetching pencairan_honor:', errPencairan.message);
           setPencairanList([]);
         } else if (dataPencairan) {
-          setPencairanList(dataPencairan);
+          // Lengkapi setiap baris riwayat pencairan dengan nama mitra & SOBAT ID
+          // dari penugasan terkait (pencairan_honor sendiri hanya menyimpan sobat_id mentah).
+          const enrichedPencairan: RiwayatPencairan[] = dataPencairan.map((item: any) => {
+            const info = mitraByPenugasanId[item.penugasan_id];
+            return {
+              id: item.id,
+              tgl_pencairan: item.tgl_pencairan,
+              catatan: item.catatan,
+              bulan_pencairan: item.bulan_pencairan,
+              nominal_dicairkan: item.nominal_dicairkan,
+              sobat_id: info?.sobatId || item.sobat_id || '-',
+              nama_mitra: info?.namaMitra || '-',
+            };
+          });
+          setPencairanList(enrichedPencairan);
           setRiwayatPage(1);
         }
       } else {
-        // Jika belum ada penugasan sama sekali pada kegiatan ini
         setMitraList([]);
         setPencairanList([]);
         setMitraPage(1);
@@ -163,7 +235,6 @@ export default function DetailKegiatanPage() {
     fetchDetailKegiatan();
   }, [fetchDetailKegiatan]);
 
-  // Kalkulasi Ringkasan
   const totalPagu = kegiatan?.pagu_anggaran ?? 0;
   const totalTerpakai = useMemo(() => {
     return mitraList.reduce((acc, curr) => acc + (curr.hak_honor || 0), 0);
@@ -171,7 +242,6 @@ export default function DetailKegiatanPage() {
   const sisaAnggaran = totalPagu - totalTerpakai;
   const jumlahMitra = mitraList.length;
 
-  // Logika Pagination - Tab Mitra Ditugaskan
   const totalMitraPages = Math.ceil(mitraList.length / itemsPerPage) || 1;
   const currentMitraData = useMemo(() => {
     const start = (mitraPage - 1) * itemsPerPage;
@@ -180,7 +250,6 @@ export default function DetailKegiatanPage() {
   const mitraStartItem = mitraList.length === 0 ? 0 : (mitraPage - 1) * itemsPerPage + 1;
   const mitraEndItem = Math.min(mitraPage * itemsPerPage, mitraList.length);
 
-  // Logika Pagination - Tab Riwayat Pencairan
   const totalRiwayatPages = Math.ceil(pencairanList.length / itemsPerPage) || 1;
   const currentRiwayatData = useMemo(() => {
     const start = (riwayatPage - 1) * itemsPerPage;
@@ -189,7 +258,6 @@ export default function DetailKegiatanPage() {
   const riwayatStartItem = pencairanList.length === 0 ? 0 : (riwayatPage - 1) * itemsPerPage + 1;
   const riwayatEndItem = Math.min(riwayatPage * itemsPerPage, pencairanList.length);
 
-  // Komponen pagination footer
   const renderPaginationFooter = (
     startItem: number,
     endItem: number,
@@ -256,6 +324,15 @@ export default function DetailKegiatanPage() {
     }).format(val);
   };
 
+  const formatTanggalPendek = (val?: string) => {
+    if (!val) return '-';
+    try {
+      return new Date(val).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
+    } catch {
+      return val;
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-800 font-sans">
       <Sidebar mobileOpen={mobileSidebarOpen} onClose={() => setMobileSidebarOpen(false)} />
@@ -265,7 +342,6 @@ export default function DetailKegiatanPage() {
 
         <main className="p-4 sm:p-6 lg:p-8">
           <div className="mx-auto max-w-[1400px]">
-            {/* KEMBALI */}
             <button
               onClick={() => router.back()}
               className="inline-flex items-center gap-2 text-xs font-semibold text-indigo-900 hover:text-indigo-700 mb-4 transition"
@@ -273,7 +349,6 @@ export default function DetailKegiatanPage() {
               <span>←</span> Kembali
             </button>
 
-            {/* HEADER DETAIL */}
             <div className="flex items-center gap-3 mb-6">
               <h1 className="text-xl font-bold text-slate-800">
                 {loading ? 'Memuat...' : kegiatan?.nama_kegiatan || 'Kegiatan Tidak Ditemukan'}
@@ -285,7 +360,6 @@ export default function DetailKegiatanPage() {
               )}
             </div>
 
-            {/* CARD METRIK */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
               <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
                 <span className="text-xs font-semibold text-slate-500 mb-3">Total Pagu</span>
@@ -305,7 +379,6 @@ export default function DetailKegiatanPage() {
               </div>
             </div>
 
-            {/* TAB NAVIGASI */}
             <div className="border-b border-slate-200 mb-6 flex gap-8">
               <button
                 onClick={() => setActiveTab('mitra')}
@@ -329,7 +402,6 @@ export default function DetailKegiatanPage() {
               </button>
             </div>
 
-            {/* TAB 1: MITRA DITUGASKAN */}
             {activeTab === 'mitra' && (
               <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="overflow-x-auto">
@@ -361,17 +433,45 @@ export default function DetailKegiatanPage() {
                             <td className="py-4 px-6 text-center text-slate-400 font-medium">
                               {(mitraPage - 1) * itemsPerPage + index + 1}
                             </td>
-                            <td className="py-4 px-6 font-semibold text-slate-800">
+                            <td className="py-4 px-6 font-semibold text-slate-800 align-top">
                               {item.nama_mitra}
                             </td>
-                            <td className="py-4 px-6 text-slate-600 font-medium">
-                              {item.limit_bulanan !== null ? (
+                            <td className="py-4 px-6 text-slate-600 font-medium align-top">
+                              {item.detail_limit_per_bulan && item.detail_limit_per_bulan.length > 0 ? (
+                                item.detail_limit_per_bulan.length > 1 ? (
+                                  // Rentang lebih dari 1 bulan -> tampilkan sebagai chip horizontal yang rapi
+                                  <div className="flex flex-wrap gap-1.5 max-w-md">
+                                    {item.detail_limit_per_bulan.map((dl, idx) => (
+                                      <div
+                                        key={idx}
+                                        className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-100 rounded-full pl-2 pr-2.5 py-1"
+                                      >
+                                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
+                                        <span className="text-[9.5px] font-bold text-indigo-500 uppercase tracking-wide whitespace-nowrap">
+                                          {dl.bulan}
+                                        </span>
+                                        <span className="text-[11px] font-semibold text-slate-700 whitespace-nowrap">
+                                          {formatRupiah(dl.limit)}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  // Hanya 1 bulan -> tampilan sederhana, tidak perlu chip
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-600 font-semibold uppercase">
+                                      {item.detail_limit_per_bulan[0].bulan}
+                                    </span>
+                                    <span>{formatRupiah(item.detail_limit_per_bulan[0].limit)}</span>
+                                  </div>
+                                )
+                              ) : item.limit_bulanan !== null ? (
                                 formatRupiah(item.limit_bulanan)
                               ) : (
                                 <span className="text-slate-400 italic font-normal">Belum diatur</span>
                               )}
                             </td>
-                            <td className="py-4 px-6 text-slate-600 font-medium">
+                            <td className="py-4 px-6 text-slate-600 font-medium align-top">
                               {formatRupiah(item.hak_honor)}
                             </td>
                           </tr>
@@ -392,7 +492,6 @@ export default function DetailKegiatanPage() {
               </div>
             )}
 
-            {/* TAB 2: RIWAYAT PENCAIRAN */}
             {activeTab === 'riwayat' && (
               <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="overflow-x-auto">
@@ -400,6 +499,7 @@ export default function DetailKegiatanPage() {
                     <thead className="bg-slate-50/50 border-b border-slate-200 font-bold text-slate-700">
                       <tr>
                         <th className="py-3.5 px-6 text-center w-16">No</th>
+                        <th className="py-3.5 px-6">Mitra / SOBAT ID</th>
                         <th className="py-3.5 px-6">Tanggal Pencairan</th>
                         <th className="py-3.5 px-6">Catatan / Keterangan</th>
                         <th className="py-3.5 px-6">Nominal Dicairkan</th>
@@ -408,13 +508,13 @@ export default function DetailKegiatanPage() {
                     <tbody className="divide-y divide-slate-100">
                       {loading ? (
                         <tr>
-                          <td colSpan={4} className="py-8 text-center text-slate-400">
+                          <td colSpan={5} className="py-8 text-center text-slate-400">
                             Memuat riwayat pencairan...
                           </td>
                         </tr>
                       ) : pencairanList.length === 0 ? (
                         <tr>
-                          <td colSpan={4} className="py-8 text-center text-slate-400">
+                          <td colSpan={5} className="py-8 text-center text-slate-400">
                             Belum ada riwayat pencairan untuk kegiatan ini.
                           </td>
                         </tr>
@@ -424,8 +524,12 @@ export default function DetailKegiatanPage() {
                             <td className="py-4 px-6 text-center text-slate-400 font-medium">
                               {(riwayatPage - 1) * itemsPerPage + index + 1}
                             </td>
+                            <td className="py-4 px-6">
+                              <div className="font-semibold text-slate-800">{item.nama_mitra || '-'}</div>
+                              <div className="text-[10px] font-mono text-blue-600">{item.sobat_id || '-'}</div>
+                            </td>
                             <td className="py-4 px-6 text-slate-800 font-semibold">
-                              {item.tgl_pencairan || '-'}
+                              {formatTanggalPendek(item.tgl_pencairan)}
                             </td>
                             <td className="py-4 px-6 text-slate-600">
                               {item.catatan || item.bulan_pencairan || '-'}
