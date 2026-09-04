@@ -49,6 +49,20 @@ const BULAN_MAP: Record<string, string> = {
 };
 
 // ============================================================
+// DEFAULT PERIODE = BULAN BERJALAN SAAT INI
+// ============================================================
+// Menghasilkan string "YYYY-MM" dari tanggal hari ini (mis. "2026-09"),
+// dipakai sebagai nilai awal filter Periode Bulan supaya begitu halaman
+// dibuka, yang tampil adalah data bulan berjalan — bukan bulan yang
+// di-hardcode.
+const getCurrentYYYYMM = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+};
+
+// ============================================================
 // PARSER PERIODE KEGIATAN MULTI-BULAN
 // ============================================================
 // Kolom kegiatan.bulan_kegiatan bisa berupa beberapa format tergantung
@@ -161,8 +175,8 @@ export default function MonitoringLimitPage() {
   const [limitBulanan, setLimitBulanan] = useState<number>(FALLBACK_LIMIT_BULANAN);
   const [limitSudahDiatur, setLimitSudahDiatur] = useState<boolean>(false);
 
-  // State Filter
-  const [periodeBulan, setPeriodeBulan] = useState<string>('2026-08'); 
+  // State Filter — default-nya BULAN BERJALAN SAAT INI, bukan hardcode.
+  const [periodeBulan, setPeriodeBulan] = useState<string>(getCurrentYYYYMM());
   const [statusFilter, setStatusFilter] = useState<string>('Semua');
   const [kegiatanFilter, setKegiatanFilter] = useState<string>('Semua');
   const [searchKeyword, setSearchKeyword] = useState<string>('');
@@ -368,7 +382,7 @@ export default function MonitoringLimitPage() {
               <div>
                 <h1 className="text-base font-bold text-slate-800">Monitoring Limit</h1>
                 <p className="text-xs text-slate-500">
-                  Pantau akumulasi penerimaan honor mitra BPS per periode bulanan
+                  Pantau akumulasi penerimaan honor mitra BPS
                 </p>
               </div>
               <div
@@ -466,7 +480,7 @@ export default function MonitoringLimitPage() {
                       <th className="py-3.5 px-4">Kegiatan Diikuti</th>
                       <th className="py-3.5 px-4">Honor Terpakai</th>
                       <th className="py-3.5 px-4">Sisa Limit</th>
-                      <th className="py-3.5 px-4 text-center">Prosentase</th>
+                      <th className="py-3.5 px-4 text-center">Persentase</th>
                       <th className="py-3.5 px-4 text-center">Aksi</th>
                     </tr>
                   </thead>

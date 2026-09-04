@@ -649,19 +649,67 @@ export default function MitraPage() {
         // ====================================================
         // UPSERT MITRA
         // ====================================================
+        // PENTING: status_keaktifan TIDAK BOLEH ikut ditimpa untuk
+        // mitra yang SUDAH ADA di database. Kalau tidak, mitra yang
+        // sebelumnya di-nonaktifkan manual akan otomatis balik jadi
+        // "Aktif" lagi hanya karena SOBAT ID-nya muncul di file Excel
+        // yang diunggah (baik file yang sama maupun file lain).
+        //
+        // Caranya: cek dulu SOBAT ID mana yang sudah ada di DB.
+        // - Mitra BARU  -> tetap diupsert lengkap dengan status "Aktif".
+        // - Mitra LAMA  -> diupsert TANPA field status_keaktifan sama
+        //   sekali, supaya kolom itu tidak ikut masuk ke klausa UPDATE
+        //   dan nilai status yang sudah tersimpan (Aktif/Nonaktif)
+        //   tetap dipertahankan apa adanya.
 
-        const { error: errMitra } =
-          await supabase
+        const sobatIdsToCheck = uniqueFormattedData.map(
+          (m) => m.sobat_id
+        );
+
+        const {
+          data: existingMitraRows,
+          error: errExistingMitra,
+        } = await supabase
+          .from('mitra')
+          .select('sobat_id')
+          .in('sobat_id', sobatIdsToCheck);
+
+        if (errExistingMitra) {
+          throw errExistingMitra;
+        }
+
+        const existingSobatIdSet = new Set(
+          (existingMitraRows || []).map(
+            (row) => row.sobat_id
+          )
+        );
+
+        const mitraBaru = uniqueFormattedData.filter(
+          (m) => !existingSobatIdSet.has(m.sobat_id)
+        );
+
+        const mitraLama = uniqueFormattedData
+          .filter((m) => existingSobatIdSet.has(m.sobat_id))
+          .map(({ status_keaktifan, ...rest }) => rest);
+
+        if (mitraBaru.length > 0) {
+          const { error: errInsertBaru } = await supabase
             .from('mitra')
-            .upsert(
-              uniqueFormattedData,
-              {
-                onConflict: 'sobat_id',
-              }
-            );
+            .upsert(mitraBaru, { onConflict: 'sobat_id' });
 
-        if (errMitra) {
-          throw errMitra;
+          if (errInsertBaru) {
+            throw errInsertBaru;
+          }
+        }
+
+        if (mitraLama.length > 0) {
+          const { error: errUpdateLama } = await supabase
+            .from('mitra')
+            .upsert(mitraLama, { onConflict: 'sobat_id' });
+
+          if (errUpdateLama) {
+            throw errUpdateLama;
+          }
         }
 
         // ====================================================
@@ -1972,6 +2020,9 @@ export default function MitraPage() {
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">
                     Posisi
+                    <span className="text-rose-500">
+                    *
+                    </span>
                   </label>
 
                   <input
@@ -1985,12 +2036,16 @@ export default function MitraPage() {
                     }
                     placeholder="Pencacah / Pengawas"
                     className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
+                    required
                   />
                 </div>
 
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">
                     Kab/Kota
+                    <span className="text-rose-500">
+                    *
+                    </span>
                   </label>
 
                   <input
@@ -2004,6 +2059,7 @@ export default function MitraPage() {
                     }
                     placeholder="Kab. Mojokerto"
                     className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
+                    required
                   />
                 </div>
 
@@ -2012,6 +2068,9 @@ export default function MitraPage() {
               <div>
                 <label className="block font-medium text-slate-700 mb-1">
                   Alamat Detail
+                  <span className="text-rose-500">
+                    *
+                  </span>
                 </label>
 
                 <textarea
@@ -2025,6 +2084,7 @@ export default function MitraPage() {
                   rows={2}
                   placeholder="Jl. Raya No. 123..."
                   className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
+                  required
                 />
               </div>
 
@@ -2033,6 +2093,9 @@ export default function MitraPage() {
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">
                     No. Telp / WA
+                     <span className="text-rose-500">
+                    *
+                    </span>
                   </label>
 
                   <input
@@ -2046,6 +2109,7 @@ export default function MitraPage() {
                     }
                     placeholder="081234567890"
                     className="w-full px-3 py-2 border border-slate-200 rounded outline-none focus:border-blue-500"
+                    required
                   />
                 </div>
 

@@ -169,7 +169,7 @@ export default function WorkDistributionSection({
         <div>
           <h2 className="text-sm font-bold text-slate-800">Pemerataan Penugasan Mitra</h2>
           <p className="text-[11px] text-slate-500">
-            Distribusi jumlah kegiatan per mitra — soal adil-tidaknya pembagian kerja, terpisah dari status limit honor bulanan di atas.
+            Distribusi jumlah kegiatan per mitra
           </p>
         </div>
 

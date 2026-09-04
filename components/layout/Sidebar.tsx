@@ -250,13 +250,14 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        {/* LOGO BPS */}
-        <div className="flex h-[70px] items-center justify-center border-b border-white/15 px-4">
+        {/* LOGO BPS — tinggi disamakan dengan Header (62px) supaya garis
+            pembatas di bawah logo & garis pembatas Header sejajar lurus. */}
+        <div className="flex h-[62px] items-center justify-center border-b border-white/15 px-4">
           <Link href="/dashboard" onClick={onClose} className="flex items-center justify-center">
             <img
               src="/Rectangle 10.png"
               alt="BPS Kota Mojokerto"
-              className="w-auto max-w-[190px] max-h-[50px] object-contain"
+              className="w-auto max-w-[190px] max-h-[42px] object-contain"
             />
           </Link>
         </div>

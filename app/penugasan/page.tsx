@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -37,6 +37,7 @@ interface PenugasanData {
     posisi_mitra?: string;
     kab_kota?: string;
     no_hp?: string;
+    status_keaktifan?: string;
   };
 
   kegiatan?: {
@@ -57,6 +58,7 @@ interface MitraOption {
   sobat_id: string;
   nama_mitra: string;
   posisi_mitra?: string;
+  status_keaktifan?: string;
 }
 
 interface KegiatanOption {
@@ -339,6 +341,28 @@ export default function PenugasanPage() {
     status_penugasan: 'Ditugaskan',
   });
 
+  // =========================================================
+  // COMBOBOX PENCARIAN MITRA (dropdown "Pilih Mitra" di modal)
+  // =========================================================
+  // Diganti dari <select> native jadi dropdown custom supaya (1) bisa
+  // dicari dengan mengetik nama/SOBAT ID, dan (2) badge status (Nonaktif,
+  // Sudah Limit, dst.) bisa diberi warna — <option> bawaan HTML tidak bisa
+  // diwarnai per-item, itu sebabnya sebelumnya keterangan "Nonaktif" cuma
+  // teks polos yang gampang kelewat.
+  const [isMitraDropdownOpen, setIsMitraDropdownOpen] = useState<boolean>(false);
+  const [mitraSearchKeyword, setMitraSearchKeyword] = useState<string>('');
+  const mitraDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (mitraDropdownRef.current && !mitraDropdownRef.current.contains(e.target as Node)) {
+        setIsMitraDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [isBulkDeleting, setIsBulkDeleting] = useState<boolean>(false);
   const [isBulkStatusModalOpen, setIsBulkStatusModalOpen] = useState<boolean>(false);
@@ -366,7 +390,7 @@ export default function PenugasanPage() {
     try {
       const { data: resMitra, error: errMitra } = await supabase
         .from('mitra')
-        .select('sobat_id, nama_mitra, posisi_mitra')
+        .select('sobat_id, nama_mitra, posisi_mitra, status_keaktifan')
         .order('nama_mitra');
 
       if (errMitra) console.error('Error fetching mitra:', errMitra.message);
@@ -401,7 +425,7 @@ export default function PenugasanPage() {
         .from('penugasan')
         .select(`
           *,
-          mitra:sobat_id ( nama_mitra, posisi_mitra, kab_kota, no_hp ),
+          mitra:sobat_id ( nama_mitra, posisi_mitra, kab_kota, no_hp, status_keaktifan ),
           kegiatan:kegiatan_id ( nama_kegiatan, kode_kegiatan, bulan_kegiatan )
         `)
         .order('created_at', { ascending: false });
@@ -505,7 +529,31 @@ export default function PenugasanPage() {
     return parseBulanKegiatan(raw);
   }, [formData.kegiatan_id, kegiatanOptions]);
 
-  // Validasi apakah limit bulan kegiatan sudah disetting, dan apakah sudah melampaui limit
+  // =========================================================
+  // MITRA AKTIF vs NONAKTIF
+  // =========================================================
+  const selectableMitraOptions = useMemo(() => {
+    return mitraOptions.filter(
+      (m) => m.status_keaktifan !== 'Nonaktif' || (isEditMode && m.sobat_id === formData.sobat_id)
+    );
+  }, [mitraOptions, isEditMode, formData.sobat_id]);
+
+  // Daftar mitra yang ditampilkan di dropdown pencarian, sudah difilter
+  // berdasarkan kata kunci yang diketik (nama atau SOBAT ID).
+  const filteredMitraOptionsForCombobox = useMemo(() => {
+    const kw = mitraSearchKeyword.trim().toLowerCase();
+    if (!kw) return selectableMitraOptions;
+    return selectableMitraOptions.filter(
+      (m) => m.nama_mitra.toLowerCase().includes(kw) || m.sobat_id.toLowerCase().includes(kw)
+    );
+  }, [selectableMitraOptions, mitraSearchKeyword]);
+
+  const selectedMitraOption = useMemo(
+    () => mitraOptions.find((m) => m.sobat_id === formData.sobat_id) || null,
+    [mitraOptions, formData.sobat_id]
+  );
+
+  // Cek mitra SUDAH limit dari penugasan LAIN (tanpa memperhitungkan honor baru yang sedang diisi)
   const checkMitraLimitStatus = useCallback(
     (sobatId: string, periodeInfo: PeriodeKegiatan, excludePenugasanId?: number): LimitBlockedInfo | null => {
       if (!sobatId || periodeInfo.months.length === 0) return null;
@@ -718,10 +766,6 @@ export default function PenugasanPage() {
   ]);
 
   // focusBulan = nama bulan (tanpa tahun) yang sedang aktif di filter "Pilih Bulan".
-  // Jika diisi, perhitungan sisa limit & status HANYA memakai bulan itu (persis seperti
-  // halaman Pengaturan Limit menghitung untuk satu bulan spesifik).
-  // Jika kosong (mode "Semua Bulan"), tetap dihitung rincian per-bulan (perMonth) agar
-  // tidak ada satu bulan yang "meminjam" status bulan lain dari kegiatan multi-bulan yang sama.
   const getRowLimitSummary = useCallback(
     (item: PenugasanData, focusBulan?: string) => {
       const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
@@ -747,9 +791,6 @@ export default function PenugasanPage() {
 
       const honorPerBulan = (Number(item.total_honor) || 0) / periodeInfo.jumlahBulan;
 
-      // Bulan-bulan yang benar-benar dipakai untuk menghitung status/sisa limit.
-      // Kalau ada focusBulan yang cocok dengan salah satu bulan periode kegiatan ini,
-      // pakai HANYA bulan itu. Kalau tidak ada yang cocok (mis. "Semua Bulan"), pakai semua.
       const bulanUntukDihitung = focusBulan
         ? periodeInfo.months.filter(
             (bulanLengkap) =>
@@ -783,8 +824,6 @@ export default function PenugasanPage() {
 
         perMonth.push({ bulan, sisa, usageRatio, warnPercent, isUnset: false });
 
-        // Hanya bulan yang efektif (sesuai focusBulan, atau semua bulan jika tidak ada filter)
-        // yang menentukan worstUsageRatio & sisaLimitMin yang ditampilkan.
         if (!bulanEfektif.includes(bulan)) return;
 
         if (usageRatio > worstUsageRatio) {
@@ -809,8 +848,6 @@ export default function PenugasanPage() {
     [accumulatedHonorBySobatPeriode, getLimitObjectForPeriode]
   );
 
-  // Bulan spesifik yang sedang difilter di dropdown "Pilih Bulan" (mis. "September").
-  // undefined artinya "Semua Bulan" sedang dipilih.
   const activeFocusBulan = bulanFilter !== 'Semua Bulan' ? bulanFilter : undefined;
 
   const groupedByMitra = useMemo<MitraGroup[]>(() => {
@@ -1042,7 +1079,10 @@ export default function PenugasanPage() {
     const defaultKegiatanId = kegiatanOptions[0]?.id || 0;
     const defaultPeriodeInfo = parseBulanKegiatan(kegiatanOptions[0]?.bulan_kegiatan);
 
-    const firstAvailableMitra = mitraOptions.find((m) => !checkMitraLimitStatus(m.sobat_id, defaultPeriodeInfo));
+    // Hanya pilih mitra AKTIF sebagai default saat membuka form Tambah Penugasan.
+    const firstAvailableMitra = mitraOptions.find(
+      (m) => m.status_keaktifan !== 'Nonaktif' && !checkMitraLimitStatus(m.sobat_id, defaultPeriodeInfo)
+    );
 
     setFormData({
       sobat_id: firstAvailableMitra?.sobat_id || '',
@@ -1051,6 +1091,8 @@ export default function PenugasanPage() {
       jumlah_dicairkan: 0,
       status_penugasan: 'Ditugaskan',
     });
+    setMitraSearchKeyword('');
+    setIsMitraDropdownOpen(false);
     setIsModalOpen(true);
   };
 
@@ -1064,6 +1106,8 @@ export default function PenugasanPage() {
       jumlah_dicairkan: penugasan.jumlah_dicairkan || 0,
       status_penugasan: penugasan.status_penugasan || 'Ditugaskan',
     });
+    setMitraSearchKeyword('');
+    setIsMitraDropdownOpen(false);
     setIsModalOpen(true);
   };
 
@@ -1479,10 +1523,8 @@ export default function PenugasanPage() {
                     groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
                   const isGroupPartiallySelected =
                     groupItemIds.some((id) => selectedIds.includes(id)) && !isGroupFullySelected;
+                  const isMitraNonaktif = group.mitra?.status_keaktifan === 'Nonaktif';
 
-                  // Hitung status level-mitra berdasarkan PROPORSI bulan yang benar-benar
-                  // bermasalah, bukan langsung "terlampaui" hanya karena satu dari beberapa
-                  // bulan kegiatan menyentuh limit.
                   let totalSlotBulan = 0;
                   let slotTerlampaui = 0;
                   let slotWarning = 0;
@@ -1546,12 +1588,26 @@ export default function PenugasanPage() {
                           onClick={() => handleToggleExpand(group.sobat_id)}
                           className="flex items-center gap-3 min-w-[220px] flex-1 text-left cursor-pointer"
                         >
-                          <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-sm shrink-0">
+                          <div
+                            className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
+                              isMitraNonaktif ? 'bg-slate-200 text-slate-500' : 'bg-blue-100 text-blue-700'
+                            }`}
+                          >
                             {(group.mitra?.nama_mitra || '?').charAt(0).toUpperCase()}
                           </div>
                           <div className="min-w-0">
-                            <div className="font-semibold text-slate-800 text-sm truncate">
-                              {group.mitra?.nama_mitra || '-'}
+                            <div className="flex items-center gap-1.5">
+                              <div className="font-semibold text-slate-800 text-sm truncate">
+                                {group.mitra?.nama_mitra || '-'}
+                              </div>
+                              {isMitraNonaktif && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-red-100 text-red-700 border border-red-200"
+                              title="Mitra ini sudah Nonaktif di Data Mitra — data di bawah adalah histori penugasan lama."
+                            >
+                              Nonaktif
+                            </span>
+                          )}
                             </div>
                             <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
                               <span className="font-mono text-blue-600">{group.sobat_id}</span>
@@ -1611,9 +1667,6 @@ export default function PenugasanPage() {
                                 <th className="py-2 px-3.5 text-right">
                                   {activeFocusBulan ? `Sisa Honor (${activeFocusBulan})` : 'Sisa Honor'}
                                 </th>
-                                <th className="py-2 px-3.5 text-right">
-                                  {activeFocusBulan ? `Sisa Limit (${activeFocusBulan})` : 'Sisa Limit Periode'}
-                                </th>
                                 <th className="py-2 px-3.5 text-center">Status Limit</th>
                                 <th className="py-2 px-3.5 text-center">Aksi</th>
                               </tr>
@@ -1627,22 +1680,14 @@ export default function PenugasanPage() {
                                 const dicairkan = Number(item.jumlah_dicairkan) || 0;
                                 const jumlahBulanItem = rowSummary.jumlahBulan || 1;
 
-                                // Saat difilter ke bulan tertentu, honor & dicairkan yang ditampilkan
-                                // adalah PORSI bulan itu saja (dibagi rata sesuai jumlah bulan kegiatan),
-                                // bukan total keseluruhan periode kegiatan.
                                 const hakHonorTampil = activeFocusBulan ? rowSummary.honorPerBulan : hakHonorAlokasi;
                                 const dicairkanTampil = activeFocusBulan ? dicairkan / jumlahBulanItem : dicairkan;
                                 const sisaHonorKegiatan = hakHonorTampil - dicairkanTampil;
-                                const sisaLimit = rowSummary.sisaLimitMin;
-
                                 const usageRatio = rowSummary.worstUsageRatio;
                                 const warnPercent = rowSummary.worstWarnPercent;
                                 let rowStatusLabel = 'Tersedia';
                                 let rowStatusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
 
-                                // Hitung berapa bulan (dari total periode kegiatan ini) yang benar-benar
-                                // terlampaui/mendekati/belum diset, supaya label status tidak menyamaratakan
-                                // seluruh periode hanya karena satu bulan bermasalah.
                                 const bulanTerlampauiRow = rowSummary.perMonth.filter(
                                   (pm) => !pm.isUnset && pm.usageRatio >= 100
                                 ).length;
@@ -1653,7 +1698,6 @@ export default function PenugasanPage() {
                                 const totalBulanRow = rowSummary.perMonth.length;
 
                                 if (activeFocusBulan) {
-                                  // Mode filter satu bulan spesifik: status hanya mewakili bulan itu.
                                   if (rowSummary.hasUnsetLimit) {
                                     rowStatusLabel = 'Limit Belum Disetting';
                                     rowStatusStyle = 'bg-purple-50 text-purple-700 border-purple-200';
@@ -1724,9 +1768,6 @@ export default function PenugasanPage() {
                                       ) : (
                                         <span className="text-amber-600 font-semibold">{formatRupiah(sisaHonorKegiatan)}</span>
                                       )}
-                                    </td>
-                                    <td className="py-2.5 px-3.5 text-right font-semibold text-slate-700">
-                                      {rowSummary.hasUnsetLimit ? '-' : formatRupiah(sisaLimit)}
                                     </td>
                                     <td className="py-2.5 px-3.5 text-center">
                                       <span
@@ -1878,43 +1919,139 @@ export default function PenugasanPage() {
                       </div>
                     )}
 
-                    <div>
+                    {/* ============================================
+                        PILIH MITRA — combobox pencarian (bukan <select>
+                        native) supaya: (1) bisa dicari dengan mengetik
+                        nama/SOBAT ID kalau daftar mitranya panjang, dan
+                        (2) badge status (Nonaktif, Sudah Limit, dst.) bisa
+                        diberi warna yang jelas, karena <option> HTML biasa
+                        tidak bisa diwarnai per-item.
+                    ============================================ */}
+                    <div ref={mitraDropdownRef} className="relative">
                       <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Mitra</label>
-                      <select
-                        value={formData.sobat_id}
-                        onChange={(e) => handleSelectMitraInForm(e.target.value)}
-                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none bg-white"
-                        required
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsMitraDropdownOpen((prev) => !prev);
+                          setMitraSearchKeyword('');
+                        }}
+                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-white outline-none focus:border-blue-500 flex items-center justify-between gap-2 text-left"
                       >
-                        <option value="" disabled>
-                          -- Pilih Mitra --
-                        </option>
-                        {mitraOptions.map((m) => {
-                          const blockedInfo = checkMitraLimitStatus(
-                            m.sobat_id,
-                            currentFormPeriodeInfo,
-                            isEditMode ? formData.id : undefined
-                          );
-                          const sudahDitugaskan = !!checkDuplicateAssignment(
-                            m.sobat_id,
-                            formData.kegiatan_id,
-                            isEditMode ? formData.id : undefined
-                          );
-                          let label = '';
-                          if (blockedInfo?.sebab === 'belum_setting_limit') {
-                            label = ' — Limit Belum Disetting';
-                          } else if (blockedInfo?.sebab === 'sudah_limit') {
-                            label = ' — Sudah Limit';
-                          } else if (sudahDitugaskan) {
-                            label = ' — Sudah Ditugaskan di Kegiatan Ini';
-                          }
-                          return (
-                            <option key={m.sobat_id} value={m.sobat_id}>
-                              {m.nama_mitra} ({m.sobat_id}){label}
-                            </option>
-                          );
-                        })}
-                      </select>
+                        <span className="min-w-0 truncate flex items-center gap-1.5">
+                          {selectedMitraOption ? (
+                            <>
+                              <span className="text-slate-800 font-medium truncate">
+                                {selectedMitraOption.nama_mitra}
+                              </span>
+                              <span className="text-slate-400 font-mono shrink-0">
+                                ({selectedMitraOption.sobat_id})
+                              </span>
+                              {selectedMitraOption.status_keaktifan === 'Nonaktif' && (
+                                <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
+                                  NONAKTIF
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-slate-400">-- Pilih Mitra --</span>
+                          )}
+                        </span>
+                        <span className={`text-slate-400 shrink-0 transition-transform ${isMitraDropdownOpen ? 'rotate-180' : ''}`}>
+                          ▾
+                        </span>
+                      </button>
+
+                      {isMitraDropdownOpen && (
+                        <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg overflow-hidden">
+                          <div className="p-2 border-b border-slate-100 bg-slate-50">
+                            <div className="relative">
+                              <span className="absolute inset-y-0 left-0 flex items-center pl-2 pointer-events-none text-slate-400 text-xs">
+                                🔍
+                              </span>
+                              <input
+                                type="text"
+                                autoFocus
+                                value={mitraSearchKeyword}
+                                onChange={(e) => setMitraSearchKeyword(e.target.value)}
+                                placeholder="Cari nama mitra / SOBAT ID..."
+                                className="w-full pl-7 pr-2.5 py-1.5 text-xs border border-slate-200 rounded outline-none focus:border-blue-400 bg-white"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="max-h-56 overflow-y-auto">
+                            {filteredMitraOptionsForCombobox.length === 0 ? (
+                              <div className="px-3 py-4 text-center text-[11px] text-slate-400">
+                                Tidak ada mitra yang cocok dengan pencarian.
+                              </div>
+                            ) : (
+                              filteredMitraOptionsForCombobox.map((m) => {
+                                const blockedInfo = checkMitraLimitStatus(
+                                  m.sobat_id,
+                                  currentFormPeriodeInfo,
+                                  isEditMode ? formData.id : undefined
+                                );
+                                const sudahDitugaskan = !!checkDuplicateAssignment(
+                                  m.sobat_id,
+                                  formData.kegiatan_id,
+                                  isEditMode ? formData.id : undefined
+                                );
+                                const isNonaktif = m.status_keaktifan === 'Nonaktif';
+                                const isSelected = formData.sobat_id === m.sobat_id;
+
+                                let badge: React.ReactNode = null;
+                                if (isNonaktif) {
+                                  badge = (
+                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
+                                      NONAKTIF
+                                    </span>
+                                  );
+                                } else if (blockedInfo?.sebab === 'belum_setting_limit') {
+                                  badge = (
+                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
+                                      Limit Belum Disetting
+                                    </span>
+                                  );
+                                } else if (blockedInfo?.sebab === 'sudah_limit') {
+                                  badge = (
+                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
+                                      Sudah Limit
+                                    </span>
+                                  );
+                                } else if (sudahDitugaskan) {
+                                  badge = (
+                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                                      Sudah Ditugaskan
+                                    </span>
+                                  );
+                                }
+
+                                return (
+                                  <button
+                                    key={m.sobat_id}
+                                    type="button"
+                                    onClick={() => {
+                                      handleSelectMitraInForm(m.sobat_id);
+                                      setIsMitraDropdownOpen(false);
+                                      setMitraSearchKeyword('');
+                                    }}
+                                    className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-blue-50/60 transition ${
+                                      isSelected ? 'bg-blue-50' : ''
+                                    }`}
+                                  >
+                                    <span className="min-w-0 truncate">
+                                      <span className="font-medium text-slate-800">{m.nama_mitra}</span>
+                                      <span className="text-slate-400 font-mono ml-1">({m.sobat_id})</span>
+                                    </span>
+                                    {badge}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div>

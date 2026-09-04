@@ -21,7 +21,10 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // CONSTANT
 // =========================================================
 
-const DEFAULT_LIMIT = 3000000;
+// Limit honor TIDAK di-hardcode.
+// Semua batas limit harus diambil dari tabel `limit_honor`.
+// Jika suatu bulan belum memiliki konfigurasi limit, bulan tersebut
+// tidak dianggap mencapai limit.
 const DEFAULT_WARN_PERCENT = 80;
 
 const BULAN_MAP: Record<string, string> = {
@@ -283,20 +286,62 @@ export default function LaporanPegawaiLimitPage() {
   // =========================================================
 
   const isMatchingMonth = useCallback(
-    (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
-      if (!rawDbValue) return false;
-      if (!filterYYYYMM) return true;
+    (rawDbValue: string | null | undefined, targetMonth: string) => {
+      if (!rawDbValue || !targetMonth) return false;
 
-      const val = String(rawDbValue).trim().toLowerCase();
-      const [year, monthNum] = filterYYYYMM.split('-');
-      const monthName = BULAN_MAP[monthNum] || '';
+      const dbValue = String(rawDbValue).trim().toLowerCase();
+      const targetValue = String(targetMonth).trim().toLowerCase();
 
-      const hasMonth = val.includes(monthName);
-      const hasYear = val.includes(year);
+      // targetMonth dari parser kegiatan berbentuk:
+      // "September 2026", "Oktober 2026", dst.
+      const targetMatch = targetValue.match(
+        /^(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember)\s+(\d{4})$/i
+      );
 
-      if (hasMonth && hasYear) return true;
-      if (val.includes(filterYYYYMM) || val.startsWith(filterYYYYMM)) return true;
-      if (hasMonth && !val.match(/\d{4}/)) return true;
+      if (!targetMatch) {
+        return dbValue === targetValue;
+      }
+
+      const targetMonthName = targetMatch[1].toLowerCase();
+      const targetYear = targetMatch[2];
+
+      // Ambil nama bulan dan tahun dari nilai database.
+      // Mendukung:
+      //   "September 2026"
+      //   "September"
+      //   "2026-09"
+      //   "09-2026"
+      //   "2026/09"
+      //   "September 2026 (Rp3.000.000)"
+      const dbYearMatch = dbValue.match(/\b(20\d{2})\b/);
+      const dbYear = dbYearMatch?.[1] || '';
+
+      const dbMonthNameMatch = dbValue.match(
+        /januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember/i
+      );
+
+      if (dbMonthNameMatch) {
+        const dbMonthName = dbMonthNameMatch[0].toLowerCase();
+
+        // Jika database menyimpan tahun, tahun harus sama.
+        if (dbYear) {
+          return dbMonthName === targetMonthName && dbYear === targetYear;
+        }
+
+        // Jika database hanya menyimpan nama bulan, cukup cocokkan bulan.
+        return dbMonthName === targetMonthName;
+      }
+
+      // Dukungan untuk format numerik tahun-bulan.
+      const numericYearMonth = dbValue.match(/\b(20\d{2})[-\/]?(0[1-9]|1[0-2])\b/);
+      if (numericYearMonth) {
+        const [, year, monthNum] = numericYearMonth;
+        const targetMonthNum = Object.entries(BULAN_MAP).find(
+          ([, name]) => name === targetMonthName
+        )?.[0];
+
+        return year === targetYear && monthNum === targetMonthNum;
+      }
 
       return false;
     },
@@ -408,8 +453,12 @@ export default function LaporanPegawaiLimitPage() {
       const info = limitList.find((row) => isMatchingMonth(bulan, row.bulan_periode));
 
       return {
-        maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
-        warnPercent: info?.persen_peringatan ?? DEFAULT_WARN_PERCENT,
+        // Jangan gunakan angka default Rp3.000.000.
+        // Limit harus mengikuti konfigurasi bulan di Supabase.
+        maxLimit: info ? Number(info.batas_maksimal) || 0 : 0,
+        warnPercent: info
+          ? Number(info.persen_peringatan) || DEFAULT_WARN_PERCENT
+          : DEFAULT_WARN_PERCENT,
       };
     },
     [limitList, isMatchingMonth]
@@ -514,8 +563,14 @@ export default function LaporanPegawaiLimitPage() {
       if (!info) return;
 
       const { maxLimit } = getLimitForPeriode(info.bulan);
+
+      // Jika limit bulan belum dikonfigurasi di Supabase,
+      // jangan menganggapnya mencapai limit dan jangan memakai
+      // angka default/hardcode.
+      if (maxLimit <= 0) return;
+
       const totalAllocated = accumulatedHonorBySobatBulan[key] || 0;
-      const usageRatio = maxLimit > 0 ? (totalAllocated / maxLimit) * 100 : 0;
+      const usageRatio = (totalAllocated / maxLimit) * 100;
 
       // HANYA kelompok (mitra + bulan) yang mencapai / melewati limit.
       if (usageRatio < 100) return;
@@ -753,7 +808,7 @@ export default function LaporanPegawaiLimitPage() {
 
     doc.setFontSize(10);
     doc.text(
-      'Laporan Mitra/Pegawai Mencapai Limit',
+      'Laporan Mitra Mencapai Limit',
       14,
       21
     );
@@ -923,11 +978,11 @@ export default function LaporanPegawaiLimitPage() {
             <div className="mb-4 flex flex-wrap justify-between items-center gap-3">
               <div>
                 <h1 className="text-base font-bold text-slate-800">
-                  Laporan Mitra/Pegawai Limit
+                  Laporan Mitra Limit
                 </h1>
 
                 <p className="text-xs text-slate-500">
-                  Menampilkan hanya mitra/pegawai yang telah mencapai atau melewati limit honor periode — digabung satu baris per mitra per bulan
+                  Menampilkan hanya mitra yang telah mencapai atau melewati limit honor periode — digabung satu baris per mitra per bulan
                 </p>
               </div>
 
@@ -1141,7 +1196,7 @@ export default function LaporanPegawaiLimitPage() {
                   <strong>
                     {totalItems}
                   </strong>{' '}
-                  mitra/pegawai (per periode bulan) yang
+                  mitra (per periode bulan) yang
                   sudah mencapai atau
                   melewati limit — sudah digabung per mitra per bulan.
                 </div>
@@ -1158,11 +1213,11 @@ export default function LaporanPegawaiLimitPage() {
                       </th>
 
                       <th className="py-3 px-4">
-                        Nama Mitra/Pegawai
+                        Nama Mitra
                       </th>
 
                       <th className="py-3 px-4">
-                        SOBAT ID / NIK/NIP
+                        SOBAT ID
                       </th>
 
                       <th className="py-3 px-4">
@@ -1209,7 +1264,7 @@ export default function LaporanPegawaiLimitPage() {
                           colSpan={9}
                           className="py-8 text-center text-slate-400"
                         >
-                          Tidak ada mitra/pegawai
+                          Tidak ada mitra
                           yang mencapai limit
                           sesuai filter.
                         </td>
