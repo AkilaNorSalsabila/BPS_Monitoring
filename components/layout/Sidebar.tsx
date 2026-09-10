@@ -1,9 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { getStoredTheme, subscribeThemeChange, THEME_COLORS, ThemeName } from '@/lib/theme';
 
 interface SidebarProps {
   mobileOpen: boolean;
@@ -185,29 +183,25 @@ const reportItems = [
 ];
 
 /**
- * Menu Pengaturan (bawah sidebar) -> halaman /settings
+ * Menu Pengaturan -> halaman /settings
+ * (sekarang ditampilkan sebagai grup menu biasa setelah Laporan,
+ * bukan dipisah/pinned di bagian bawah sidebar lagi)
  */
-const settingsItem = {
-  label: 'Pengaturan',
-  href: '/settings',
-  icon: 'settings' as IconName,
-};
+const settingsItems = [
+  {
+    label: 'Pengaturan',
+    href: '/settings',
+    icon: 'settings' as IconName,
+  },
+  {
+    label: 'Manajemen Akun',
+    href: 'pengaturan-akun',
+    icon: 'users' as IconName,
+  },
+];
 
 export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
-
-  /* ============================================
-     TEMA (Terang / Gelap) — sinkron real-time
-     dengan pilihan di halaman Settings
-  ============================================ */
-  const [theme, setTheme] = useState<ThemeName>('terang');
-
-  useEffect(() => {
-    setTheme(getStoredTheme());
-    return subscribeThemeChange(setTheme);
-  }, []);
-
-  const colors = THEME_COLORS[theme];
 
   /**
    * Komponen untuk menampilkan satu item menu.
@@ -220,9 +214,8 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         key={item.label}
         href={item.href}
         onClick={item.href !== '#' ? onClose : undefined}
-        style={active ? { backgroundColor: colors.sidebarActiveBg } : undefined}
         className={`flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors ${
-          active ? 'font-semibold shadow-sm' : 'text-white/95 hover:bg-white/10'
+          active ? 'bg-[#2d84d8] font-semibold shadow-sm' : 'text-white/95 hover:bg-white/10'
         }`}
       >
         <Icon name={item.icon} />
@@ -245,8 +238,7 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
       {/* Sidebar utama */}
       <aside
-        style={{ backgroundColor: colors.sidebarBg, borderColor: colors.sidebarBorder }}
-        className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r border-blue-400/60 bg-[#07508f] text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
@@ -280,14 +272,17 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           </div>
 
           {/* LAPORAN */}
-          <div>
+          <div className="mb-3">
             <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Laporan</div>
             <div className="space-y-0.5">{reportItems.map((item) => renderMenuItem(item))}</div>
           </div>
-        </nav>
 
-        {/* PENGATURAN (link ke halaman /settings) */}
-        <div className="border-t border-white/10 p-2.5">{renderMenuItem(settingsItem)}</div>
+          {/* PENGATURAN (sekarang menyatu di alur menu utama, setelah Laporan) */}
+          <div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Pengaturan</div>
+            <div className="space-y-0.5">{settingsItems.map((item) => renderMenuItem(item))}</div>
+          </div>
+        </nav>
       </aside>
     </>
   );
