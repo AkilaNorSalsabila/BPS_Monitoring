@@ -17,7 +17,8 @@ type IconName =
   | 'file'
   | 'report'
   | 'table'
-  | 'settings';
+  | 'settings'
+  | 'history';
 
 /**
  * Komponen icon SVG untuk menu sidebar.
@@ -107,6 +108,15 @@ function Icon({ name }: { name: IconName }) {
         </svg>
       );
 
+    case 'history':
+      return (
+        <svg {...common}>
+          <path d="M3 12a9 9 0 1 0 3-6.7" />
+          <path d="M3 4v4h4" />
+          <path d="M12 7v5l3.5 2" />
+        </svg>
+      );
+
     case 'settings':
       return (
         <svg {...common}>
@@ -160,6 +170,11 @@ const assignmentItems = [
     icon: 'clipboard' as IconName,
   },
   {
+    label: 'Pencairan Honor',
+    href: '/pencairan',
+    icon: 'report' as IconName,
+  },
+  {
     label: 'Monitoring Limit',
     href: '/monitoring-limit',
     icon: 'monitor' as IconName,
@@ -183,9 +198,18 @@ const reportItems = [
 ];
 
 /**
- * Menu Pengaturan -> halaman /settings
- * (sekarang ditampilkan sebagai grup menu biasa setelah Laporan,
- * bukan dipisah/pinned di bagian bawah sidebar lagi)
+ * Menu Sistem (log aktivitas, dsb).
+ */
+const systemItems = [
+  {
+    label: 'Log Aktivitas',
+    href: '/log-aktivitas',
+    icon: 'history' as IconName,
+  },
+];
+
+/**
+ * Menu Pengaturan (bawah sidebar) -> halaman /settings
  */
 const settingsItems = [
   {
@@ -276,6 +300,13 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
             <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Laporan</div>
             <div className="space-y-0.5">{reportItems.map((item) => renderMenuItem(item))}</div>
           </div>
+
+          {/* SISTEM */}
+          <div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Sistem</div>
+            <div className="space-y-0.5">{systemItems.map((item) => renderMenuItem(item))}</div>
+          </div>
+        </nav>
 
           {/* PENGATURAN (sekarang menyatu di alur menu utama, setelah Laporan) */}
           <div>

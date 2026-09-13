@@ -132,18 +132,17 @@ const BULAN_MAP: Record<string, string> = {
   '05': 'mei', '06': 'juni', '07': 'juli', '08': 'agustus',
   '09': 'september', '10': 'oktober', '11': 'november', '12': 'desember',
 };
+function isMatchingMonth(
+  calendarLabel: string | null | undefined,
+  limitPeriode: string | null | undefined
+): boolean {
+  if (!calendarLabel || !limitPeriode) return false;
 
-function isMatchingMonth(calendarLabel: string | null | undefined, filterYYYYMM: string): boolean {
-  if (!calendarLabel) return false;
-  if (!filterYYYYMM) return true;
+  const kalender = String(calendarLabel).trim().toLowerCase();
+  const periodeLimit = String(limitPeriode).trim().toLowerCase();
 
-  const val = String(calendarLabel).trim().toLowerCase();
-  const [year, monthNum] = filterYYYYMM.split('-');
-  const monthName = BULAN_MAP[monthNum] || '';
-
-  return val.includes(monthName) && val.includes(year);
+  return kalender === periodeLimit;
 }
-
 // =========================================================
 // INTERFACE
 // =========================================================
@@ -303,16 +302,18 @@ export default function DashboardPage() {
   }, [penugasanList]);
 
   const getLimitForPeriode = useCallback(
-    (bulan: string) => {
-      const info = limitList.find((row) => isMatchingMonth(bulan, row.bulan_periode));
+  (periode: string) => {
+    const info = limitList.find((row) =>
+      isMatchingMonth(periode, row.bulan_periode)
+    );
 
-      return {
-        maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
-        warnPercent: info?.persen_peringatan ?? 80,
-      };
-    },
-    [limitList]
-  );
+    return {
+      maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
+      warnPercent: info?.persen_peringatan ?? 80,
+    };
+  },
+  [limitList]
+);
 
   /* ============================================
      STATS: Total Mitra, Sudah Limit, Masih Tersedia,

@@ -8,6 +8,7 @@ import autoTable from 'jspdf-autotable';
 
 import Header from '@/components/layout/Header';
 import Sidebar from '@/components/layout/Sidebar';
+import { logActivity } from '@/lib/logActivity';
 
 // Initializing Supabase Client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
@@ -342,6 +343,13 @@ export default function MitraPage() {
     setIsBulkDeleting(true);
 
     try {
+      // Simpan salinan mitra yang akan dihapus SEBELUM dieksekusi,
+      // supaya nama & SOBAT ID-nya tetap bisa dicatat di log
+      // walaupun datanya sudah tidak ada lagi di tabel setelah dihapus.
+      const mitraTerhapus = mitraList.filter((m) =>
+        selectedIds.includes(m.sobat_id)
+      );
+
       const { error } = await supabase
         .from('mitra')
         .delete()
@@ -350,6 +358,16 @@ export default function MitraPage() {
       if (error) {
         throw error;
       }
+
+      const daftarNama = mitraTerhapus
+        .map((m) => `${m.nama_mitra} (${m.sobat_id})`)
+        .join(', ');
+
+      await logActivity({
+        aksi: 'hapus',
+        entitas: 'mitra',
+        deskripsi: `Menghapus ${selectedIds.length} data mitra sekaligus: ${daftarNama || selectedIds.join(', ')}`,
+      });
 
       alert(
         `${selectedIds.length} data mitra berhasil dihapus.`
@@ -383,6 +401,12 @@ export default function MitraPage() {
     setIsBulkStatusSubmitting(true);
 
     try {
+      // Simpan salinan sebelum diubah, supaya nama mitra tetap
+      // bisa ditampilkan lengkap di deskripsi log.
+      const mitraDiubah = mitraList.filter((m) =>
+        selectedIds.includes(m.sobat_id)
+      );
+
       const { error } = await supabase
         .from('mitra')
         .update({
@@ -393,6 +417,16 @@ export default function MitraPage() {
       if (error) {
         throw error;
       }
+
+      const daftarNama = mitraDiubah
+        .map((m) => `${m.nama_mitra} (${m.sobat_id})`)
+        .join(', ');
+
+      await logActivity({
+        aksi: 'ubah',
+        entitas: 'mitra',
+        deskripsi: `Mengubah status ${selectedIds.length} mitra terpilih menjadi "${bulkStatusValue}": ${daftarNama || selectedIds.join(', ')}`,
+      });
 
       alert(
         `Status ${selectedIds.length} mitra terpilih berhasil diubah menjadi "${bulkStatusValue}".`
@@ -775,6 +809,7 @@ export default function MitraPage() {
         );
 
         let kegiatanId: number | null = null;
+        let kegiatanBaruDibuat = false;
 
         // Cek kegiatan yang sudah ada berdasarkan
         // nama kegiatan + rentang periode
@@ -853,6 +888,7 @@ export default function MitraPage() {
           }
 
           kegiatanId = newKegiatan.id;
+          kegiatanBaruDibuat = true;
         }
 
         // ====================================================
@@ -882,6 +918,20 @@ export default function MitraPage() {
             throw errPenugasan;
           }
         }
+
+        // ====================================================
+        // CATAT LOG AKTIVITAS
+        // ====================================================
+        // Satu entri log ringkas mencakup: jumlah mitra yang
+        // diimpor/diperbarui, ke kegiatan mana mereka didaftarkan,
+        // dan apakah kegiatan itu baru dibuat otomatis atau sudah ada.
+
+        await logActivity({
+          aksi: 'tambah',
+          entitas: 'mitra',
+          deskripsi: `Mengunggah Excel: ${uniqueFormattedData.length} data mitra (${mitraBaru.length} baru, ${mitraLama.length} diperbarui) didaftarkan ke kegiatan "${namaKegiatan}" (${bulanKegiatanDisisipkan})${kegiatanBaruDibuat ? ' — kegiatan baru otomatis dibuat' : ''}`,
+          referensiId: kegiatanId,
+        });
 
         alert(
           `Berhasil!\n- ${uniqueFormattedData.length} data mitra diimpor/diperbarui.\n- Otomatis terdaftar pada Kegiatan: "${namaKegiatan}" (${bulanKegiatanDisisipkan}).`
@@ -1062,6 +1112,13 @@ export default function MitraPage() {
           throw error;
         }
 
+        await logActivity({
+          aksi: 'ubah',
+          entitas: 'mitra',
+          deskripsi: `Memperbarui data mitra ${formData.nama_mitra} (${formData.sobat_id})`,
+          referensiId: formData.sobat_id,
+        });
+
         alert(
           'Data mitra berhasil diperbarui.'
         );
@@ -1074,6 +1131,13 @@ export default function MitraPage() {
         if (error) {
           throw error;
         }
+
+        await logActivity({
+          aksi: 'tambah',
+          entitas: 'mitra',
+          deskripsi: `Menambahkan mitra baru ${formData.nama_mitra} (${formData.sobat_id})`,
+          referensiId: formData.sobat_id,
+        });
 
         alert(
           'Mitra baru berhasil ditambahkan.'
@@ -1127,6 +1191,13 @@ export default function MitraPage() {
       if (error) {
         throw error;
       }
+
+      await logActivity({
+        aksi: 'hapus',
+        entitas: 'mitra',
+        deskripsi: `Menghapus data mitra ${nama} (${sobatId})`,
+        referensiId: sobatId,
+      });
 
       alert(
         'Data mitra berhasil dihapus.'

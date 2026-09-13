@@ -7,6 +7,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import Header from '@/components/layout/Header';
 import Sidebar from '@/components/layout/Sidebar';
+import { logActivity } from '@/lib/logActivity';
 
 // Initializing Supabase Client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
@@ -138,10 +139,12 @@ export default function KegiatanPage() {
       setKegiatanList(data || []);
       setCurrentPage(1);
     } catch (err: any) {
-  console.error('Error detail:', JSON.stringify(err, null, 2));
-  console.error('Error saving kegiatan:', err.message || err.error_description || err.details || err);
-  alert('Gagal menyimpan kegiatan: ' + (err.message || err.details || JSON.stringify(err)));
-}finally {
+      console.error('Error fetching kegiatan:', err);
+      alert(
+        'Gagal memuat data kegiatan: ' +
+          (err?.message || err?.details || err?.hint || 'Terjadi kesalahan')
+      );
+    } finally {
       setLoading(false);
     }
   }, [searchKeyword]);
@@ -306,18 +309,38 @@ export default function KegiatanPage() {
           .eq('id', selectedId);
 
         if (error) throw error;
+
+        await logActivity({
+          aksi: 'ubah',
+          entitas: 'kegiatan',
+          deskripsi: `Memperbarui kegiatan "${formData.nama_kegiatan}" (${formData.kode_kegiatan}) — periode ${finalPeriode}, pagu ${formatRupiah(Number(formData.pagu_anggaran))}`,
+          referensiId: selectedId,
+        });
+
         alert('Kegiatan berhasil diperbarui.');
       } else {
-        const { error } = await supabase.from('kegiatan').insert([
-          {
-            kode_kegiatan: formData.kode_kegiatan,
-            nama_kegiatan: formData.nama_kegiatan,
-            bulan_kegiatan: finalPeriode,
-            pagu_anggaran: Number(formData.pagu_anggaran),
-          },
-        ]);
+        const { data: inserted, error } = await supabase
+          .from('kegiatan')
+          .insert([
+            {
+              kode_kegiatan: formData.kode_kegiatan,
+              nama_kegiatan: formData.nama_kegiatan,
+              bulan_kegiatan: finalPeriode,
+              pagu_anggaran: Number(formData.pagu_anggaran),
+            },
+          ])
+          .select('id')
+          .single();
 
         if (error) throw error;
+
+        await logActivity({
+          aksi: 'tambah',
+          entitas: 'kegiatan',
+          deskripsi: `Menambahkan kegiatan baru "${formData.nama_kegiatan}" (${formData.kode_kegiatan}) — periode ${finalPeriode}, pagu ${formatRupiah(Number(formData.pagu_anggaran))}`,
+          referensiId: inserted?.id,
+        });
+
         alert('Kegiatan baru berhasil ditambahkan.');
       }
 
@@ -339,6 +362,13 @@ export default function KegiatanPage() {
     try {
       const { error } = await supabase.from('kegiatan').delete().eq('id', id);
       if (error) throw error;
+
+      await logActivity({
+        aksi: 'hapus',
+        entitas: 'kegiatan',
+        deskripsi: `Menghapus kegiatan "${nama}"`,
+        referensiId: id,
+      });
 
       alert('Kegiatan berhasil dihapus.');
       fetchKegiatan();

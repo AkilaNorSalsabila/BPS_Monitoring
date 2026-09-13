@@ -1,20 +1,47 @@
 'use client';
 
+// =========================================================
+// LOKASI FILE INI: app/penugasan/page.tsx
+//
+// VERSI GABUNGAN:
+// - Data penugasan tetap fokus pada informasi penugasan.
+// - Total rencana pencairan dihitung dari pencairan_honor.nominal_rencana.
+// - Realisasi dan sisa tidak ditampilkan di sini karena menjadi tanggung jawab /pencairan.
+// - Blokir limit yang SESUNGGUHNYA tetap terjadi di halaman /pencairan.
+// - Tampilan TABEL dikembalikan mengelompok per Mitra (expand/collapse)
+//   seperti versi lama, supaya mitra yang mengikuti banyak kegiatan tidak
+//   muncul berkali-kali sebagai baris terpisah.
+// - Badge status limit TIDAK LAGI biner (penuh/aman) untuk seluruh
+//   kegiatan multi-bulan. Sekarang dihitung per-bulan, lalu ditampilkan
+//   sebagai ringkasan proporsi (mis. "1/3 Bulan Penuh") dan rincian
+//   lengkap per bulan bisa dilihat di Modal Detail.
+// - FIX: ringkasan badge level-MITRA (getGroupLimitBadge) sekarang
+//   DEDUPE per bulan. Sebelumnya kalau satu mitra punya 2 kegiatan yang
+//   sama-sama menyentuh bulan yang sama (mis. kegiatan A = September,
+//   kegiatan B = September-Oktober), bulan September dihitung DUA KALI
+//   di ringkasan mitra (karena loop menjumlahkan status per kegiatan
+//   tanpa mengecek bulan yang sudah pernah dihitung), padahal limit
+//   honor itu satu bucket per mitra-per-bulan yang dipakai bersama
+//   lintas kegiatan. Sekarang bulan yang sama hanya dihitung sekali.
+// =========================================================
+
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 import Header from '@/components/layout/Header';
 import Sidebar from '@/components/layout/Sidebar';
+import { logActivity } from '@/lib/logActivity';
 
 // =========================================================
 // SUPABASE
 // =========================================================
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const supabaseKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -26,9 +53,6 @@ interface PenugasanData {
   id?: number;
   sobat_id: string;
   kegiatan_id: number;
-  peran?: string;
-  total_honor?: number;
-  jumlah_dicairkan?: number;
   status_penugasan?: string;
   created_at?: string;
 
@@ -45,13 +69,10 @@ interface PenugasanData {
     kode_kegiatan: string;
     bulan_kegiatan: string;
   };
-}
 
-interface LimitHonor {
-  id: number;
-  bulan_periode: string;
-  batas_maksimal: number;
-  persen_peringatan: number;
+  // Total rencana dihitung dari pencairan_honor.nominal_rencana.
+  // Realisasi dan sisa dikelola/ditampilkan di halaman Pencairan.
+  totalRencana?: number;
 }
 
 interface MitraOption {
@@ -68,34 +89,26 @@ interface KegiatanOption {
   bulan_kegiatan: string;
 }
 
-interface LimitBlockedInfo {
-  namaMitra: string;
-  periode: string;
-  limitBulanan: number;
-  hakHonorAlokasi: number;
-  sudahDicairkan: number;
-  sisaLimit: number;
-  persenTerpakai: number;
-  sebab: 'sudah_limit' | 'akan_melebihi' | 'belum_setting_limit';
-}
-
 interface DuplicateBlockedInfo {
   namaMitra: string;
   namaKegiatan: string;
 }
 
-interface PencairanHonor {
-  id?: number;
+// Referensi limit honor bulanan (read-only, cuma untuk ditampilkan sebagai
+// acuan — pengecekan/blokir yang sebenarnya tetap di halaman /pencairan
+// saat rencana pencairan benar-benar dibuat).
+interface LimitHonorRef {
+  bulan_periode: string;
+  batas_maksimal: number;
+  persen_peringatan?: number;
+}
+
+interface PencairanRef {
   sobat_id: string;
-  penugasan_id: number;
-  tgl_pencairan: string;
-  tahap_ke?: number;
-  nominal_dicairkan: number;
-  bulan_pencairan?: string | null;
-  metode_pembayaran?: string | null;
-  no_referensi_sp2d?: string | null;
-  catatan?: string | null;
-  created_at?: string;
+  bulan_pencairan: string;
+  nominal_rencana: number;
+  nominal_dicairkan?: number | null;
+  tgl_pencairan?: string | null;
 }
 
 const NAMA_BULAN_ID = [
@@ -103,92 +116,41 @@ const NAMA_BULAN_ID = [
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
 ];
 
+const DEFAULT_WARN_PERCENT = 80;
+
 // =========================================================
 // CONSTANT
 // =========================================================
 
-const STATUS_OPTIONS = [
-  'Semua Status',
-  'Ditugaskan',
-  'Berjalan',
-  'Selesai',
-  'Dibatalkan',
-];
+const STATUS_OPTIONS = ['Semua Status', 'Ditugaskan', 'Berjalan', 'Selesai', 'Dibatalkan'];
 
 const BULAN_OPTIONS = [
   'Semua Bulan',
-  'Januari',
-  'Februari',
-  'Maret',
-  'April',
-  'Mei',
-  'Juni',
-  'Juli',
-  'Agustus',
-  'September',
-  'Oktober',
-  'November',
-  'Desember',
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
 ];
-
-// Default warning percent jika belum diatur di database
-const DEFAULT_WARN_PERCENT = 80;
-
-const BULAN_MAP: Record<string, string> = {
-  '01': 'januari',
-  '02': 'februari',
-  '03': 'maret',
-  '04': 'april',
-  '05': 'mei',
-  '06': 'juni',
-  '07': 'juli',
-  '08': 'agustus',
-  '09': 'september',
-  '10': 'oktober',
-  '11': 'november',
-  '12': 'desember',
-};
-
-const isMatchingMonth = (rawDbValue: string | null | undefined, filterYYYYMM: string) => {
-  if (!rawDbValue) return false;
-  if (!filterYYYYMM) return true;
-
-  const val = String(rawDbValue).trim().toLowerCase();
-  const filterStr = String(filterYYYYMM).trim().toLowerCase();
-
-  // 1. Kecocokan langsung (misal: "januari 2026" === "januari 2026" atau "2026-01" === "2026-01")
-  if (val === filterStr) return true;
-
-  // 2. Ekstrak tahun dan bulan dari filterYYYYMM (asumsi format "YYYY-MM" atau "NamaBulan Tahun")
-  const [year, monthNum] = filterStr.split('-');
-  const monthName = BULAN_MAP[monthNum] || '';
-
-  const hasMonth = monthName ? val.includes(monthName) : false;
-  const hasYear = year ? val.includes(year) : false;
-
-  if (hasMonth && hasYear) return true;
-  if (val.includes(filterStr) || val.startsWith(filterStr)) return true;
-  
-  // 3. Tangani jika database menyimpan format angka bulan tunggal atau format lain
-  if (monthNum && (val.includes(`-${monthNum}-`) || val.endsWith(`-${monthNum}`) || val.startsWith(`${monthNum}-`))) {
-    return true;
-  }
-
-  return false;
-};
 
 // =========================================================
 // PARSER PERIODE KEGIATAN MULTI-BULAN
 // =========================================================
 
 interface PeriodeKegiatan {
-  months: string[]; 
+  months: string[];
   jumlahBulan: number;
-  label: string; 
+  label: string;
 }
 
 const monthIndexFromName = (name: string): number =>
   NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
+
+const dateToMonthLabel = (dateValue: string | null | undefined): string | null => {
+  if (!dateValue) return null;
+  const monthKey = dateValue.slice(0, 7);
+  const [year, month] = monthKey.split('-');
+  const monthNumber = Number(month);
+  if (!year || !monthNumber || monthNumber < 1 || monthNumber > 12) return null;
+  return `${NAMA_BULAN_ID[monthNumber - 1]} ${year}`;
+};
 
 const generateMonthSequence = (startMonthIdx: number, startYear: number, count: number): string[] => {
   const result: string[] = [];
@@ -205,27 +167,13 @@ const generateMonthSequence = (startMonthIdx: number, startYear: number, count: 
   return result;
 };
 
-const RANGE_REGEX =
-  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*-\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})$/i;
+const RANGE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*-\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})$/i;
+const RANGE_SD_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*s\.?\s*d\.?\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})(?:\s*\((\d+)\s*Bulan\))?$/i;
+const SINGLE_REGEX = /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*\((\d+)\s*Bulan\)$/i;
 
-const RANGE_SD_REGEX =
-  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*s\.?\s*d\.?\s*([A-Za-zÀ-ÿ]+)\s+(\d{4})(?:\s*\((\d+)\s*Bulan\))?$/i;
-
-const SINGLE_REGEX =
-  /^([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*\((\d+)\s*Bulan\)$/i;
-
-const parseBulanKegiatan = (
-  raw: string | null | undefined
-): PeriodeKegiatan => {
+const parseBulanKegiatan = (raw: string | null | undefined): PeriodeKegiatan => {
   const text = (raw || '').trim();
-
-  if (!text) {
-    return {
-      months: [],
-      jumlahBulan: 0,
-      label: '-',
-    };
-  }
+  if (!text) return { months: [], jumlahBulan: 0, label: '-' };
 
   const rangeMatch = text.match(RANGE_REGEX);
   if (rangeMatch) {
@@ -234,15 +182,10 @@ const parseBulanKegiatan = (
     const endIdx = monthIndexFromName(endName);
     const startYear = parseInt(startYearStr, 10);
     const endYear = parseInt(endYearStr, 10);
-
     if (startIdx !== -1 && endIdx !== -1) {
       const totalBulan = (endYear - startYear) * 12 + (endIdx - startIdx) + 1;
       if (totalBulan > 0 && totalBulan <= 36) {
-        return {
-          months: generateMonthSequence(startIdx, startYear, totalBulan),
-          jumlahBulan: totalBulan,
-          label: text,
-        };
+        return { months: generateMonthSequence(startIdx, startYear, totalBulan), jumlahBulan: totalBulan, label: text };
       }
     }
   }
@@ -254,18 +197,12 @@ const parseBulanKegiatan = (
     const endIdx = monthIndexFromName(endName);
     const startYear = parseInt(startYearStr, 10);
     const endYear = parseInt(endYearStr, 10);
-
     if (startIdx !== -1 && endIdx !== -1) {
       const calculatedJumlahBulan = (endYear - startYear) * 12 + (endIdx - startIdx) + 1;
       if (calculatedJumlahBulan > 0 && calculatedJumlahBulan <= 36) {
         const jumlahBulanDariTeks = jumlahStr ? parseInt(jumlahStr, 10) : calculatedJumlahBulan;
         const jumlahBulan = jumlahBulanDariTeks > 0 && jumlahBulanDariTeks <= 36 ? jumlahBulanDariTeks : calculatedJumlahBulan;
-
-        return {
-          months: generateMonthSequence(startIdx, startYear, jumlahBulan),
-          jumlahBulan,
-          label: text,
-        };
+        return { months: generateMonthSequence(startIdx, startYear, jumlahBulan), jumlahBulan, label: text };
       }
     }
   }
@@ -275,44 +212,44 @@ const parseBulanKegiatan = (
     const [, monthName, yearStr, jumlahStr] = singleMatch;
     const startIdx = monthIndexFromName(monthName);
     const jumlah = Math.max(parseInt(jumlahStr, 10) || 1, 1);
-
     if (startIdx !== -1) {
-      return {
-        months: generateMonthSequence(startIdx, parseInt(yearStr, 10), jumlah),
-        jumlahBulan: jumlah,
-        label: text,
-      };
+      return { months: generateMonthSequence(startIdx, parseInt(yearStr, 10), jumlah), jumlahBulan: jumlah, label: text };
     }
   }
 
-  return {
-    months: [text],
-    jumlahBulan: 1,
-    label: text,
-  };
+  return { months: [text], jumlahBulan: 1, label: text };
 };
+
+// =========================================================
+// STATUS LIMIT PER BULAN (inti perbaikan)
+// =========================================================
+
+interface MonthLimitStatus {
+  bulan: string;
+  limit: number | null; // null = belum diatur
+  used: number;
+  sisa: number | null;
+  warnPercent: number;
+  isUnset: boolean;
+  isFull: boolean;
+  isWarning: boolean;
+}
 
 interface MitraGroup {
   sobat_id: string;
   mitra?: PenugasanData['mitra'];
   items: PenugasanData[];
-  totalAlokasi: number;
-  totalDicairkan: number;
-  totalSisaHonor: number;
-  worstUsageRatio: number;
-  worstWarnPercent: number;
+  totalRencana: number;
 }
 
 export default function PenugasanPage() {
+  const router = useRouter();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
 
-  // Semua penugasan untuk perhitungan limit. Jangan memakai data yang sudah terfilter.
-  const [allPenugasanList, setAllPenugasanList] = useState<PenugasanData[]>([]);
-  // Data penugasan yang hanya digunakan untuk tampilan/filter tabel.
+  const [penugasanListRaw, setPenugasanListRaw] = useState<PenugasanData[]>([]);
   const [penugasanList, setPenugasanList] = useState<PenugasanData[]>([]);
   const [mitraOptions, setMitraOptions] = useState<MitraOption[]>([]);
   const [kegiatanOptions, setKegiatanOptions] = useState<KegiatanOption[]>([]);
-  const [limitList, setLimitList] = useState<LimitHonor[]>([]);
 
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -336,19 +273,10 @@ export default function PenugasanPage() {
   const [formData, setFormData] = useState<PenugasanData>({
     sobat_id: '',
     kegiatan_id: 0,
-    total_honor: 0,
-    jumlah_dicairkan: 0,
     status_penugasan: 'Ditugaskan',
   });
 
-  // =========================================================
-  // COMBOBOX PENCARIAN MITRA (dropdown "Pilih Mitra" di modal)
-  // =========================================================
-  // Diganti dari <select> native jadi dropdown custom supaya (1) bisa
-  // dicari dengan mengetik nama/SOBAT ID, dan (2) badge status (Nonaktif,
-  // Sudah Limit, dst.) bisa diberi warna — <option> bawaan HTML tidak bisa
-  // diwarnai per-item, itu sebabnya sebelumnya keterangan "Nonaktif" cuma
-  // teks polos yang gampang kelewat.
+  // Combobox pencarian mitra
   const [isMitraDropdownOpen, setIsMitraDropdownOpen] = useState<boolean>(false);
   const [mitraSearchKeyword, setMitraSearchKeyword] = useState<string>('');
   const mitraDropdownRef = useRef<HTMLDivElement>(null);
@@ -369,22 +297,16 @@ export default function PenugasanPage() {
   const [bulkStatusValue, setBulkStatusValue] = useState<string>('Selesai');
   const [isBulkStatusSubmitting, setIsBulkStatusSubmitting] = useState<boolean>(false);
 
-  const [isLimitBlockedModalOpen, setIsLimitBlockedModalOpen] = useState<boolean>(false);
-  const [limitBlockedInfo, setLimitBlockedInfo] = useState<LimitBlockedInfo | null>(null);
-
   const [isDuplicateBlockedModalOpen, setIsDuplicateBlockedModalOpen] = useState<boolean>(false);
   const [duplicateBlockedInfo, setDuplicateBlockedInfo] = useState<DuplicateBlockedInfo | null>(null);
 
-  const [isPencairanModalOpen, setIsPencairanModalOpen] = useState<boolean>(false);
-  const [pencairanPenugasan, setPencairanPenugasan] = useState<PenugasanData | null>(null);
-  const [riwayatPencairan, setRiwayatPencairan] = useState<PencairanHonor[]>([]);
-  const [isLoadingRiwayat, setIsLoadingRiwayat] = useState<boolean>(false);
-  const [isPencairanSubmitting, setIsPencairanSubmitting] = useState<boolean>(false);
-  const [pencairanForm, setPencairanForm] = useState<{ nominal: number; tanggal: string; catatan: string }>({
-    nominal: 0,
-    tanggal: new Date().toISOString().slice(0, 10),
-    catatan: '',
-  });
+  // Data referensi limit honor bulanan
+  const [limitRefList, setLimitRefList] = useState<LimitHonorRef[]>([]);
+  const [pencairanRefList, setPencairanRefList] = useState<PencairanRef[]>([]);
+
+  // ---------------------------------------------------------
+  // FETCH
+  // ---------------------------------------------------------
 
   const fetchDropdownData = useCallback(async () => {
     try {
@@ -392,7 +314,6 @@ export default function PenugasanPage() {
         .from('mitra')
         .select('sobat_id, nama_mitra, posisi_mitra, status_keaktifan')
         .order('nama_mitra');
-
       if (errMitra) console.error('Error fetching mitra:', errMitra.message);
       if (resMitra) setMitraOptions(resMitra);
 
@@ -400,19 +321,22 @@ export default function PenugasanPage() {
         .from('kegiatan')
         .select('id, nama_kegiatan, kode_kegiatan, bulan_kegiatan')
         .order('nama_kegiatan');
-
       if (errKegiatan) console.error('Error fetching kegiatan:', errKegiatan.message);
       if (resKegiatan) setKegiatanOptions(resKegiatan);
 
+      // Referensi limit — dipakai hanya untuk tabel acuan/badge, bukan untuk
+      // blokir (blokir tetap di halaman /pencairan).
       const { data: resLimit, error: errLimit } = await supabase
         .from('limit_honor')
-        .select('id, bulan_periode, batas_maksimal, persen_peringatan');
+        .select('bulan_periode, batas_maksimal, persen_peringatan');
+      if (errLimit) console.error('Error fetching limit_honor:', errLimit.message);
+      if (resLimit) setLimitRefList(resLimit);
 
-      if (errLimit) {
-        console.error('Error fetching limit_honor:', errLimit.message);
-      } else if (resLimit) {
-        setLimitList(resLimit);
-      }
+      const { data: resPencairan, error: errPencairan } = await supabase
+        .from('pencairan_honor')
+        .select('sobat_id, bulan_pencairan, nominal_rencana, nominal_dicairkan, tgl_pencairan');
+      if (errPencairan) console.error('Error fetching pencairan_honor:', errPencairan.message);
+      if (resPencairan) setPencairanRefList(resPencairan);
     } catch (error) {
       console.error('Error fetching dropdown data:', error);
     }
@@ -421,6 +345,9 @@ export default function PenugasanPage() {
   const fetchPenugasan = useCallback(async () => {
     setLoading(true);
     try {
+      // Ambil data penugasan langsung dari tabel penugasan.
+      // JANGAN memakai view penugasan_totals karena view tersebut
+      // tidak diperlukan dan dapat menyebabkan error relasi/query.
       const { data, error } = await supabase
         .from('penugasan')
         .select(`
@@ -432,10 +359,31 @@ export default function PenugasanPage() {
 
       if (error) throw error;
 
-      const allData: PenugasanData[] = data || [];
-      setAllPenugasanList(allData);
+      // Total rencana dihitung langsung dari pencairan_honor.nominal_rencana.
+      // Realisasi dan sisa tidak ditampilkan di Penugasan karena menjadi
+      // tanggung jawab halaman Pencairan.
+      const { data: pencairanTotals, error: pencairanTotalsError } = await supabase
+        .from('pencairan_honor')
+        .select('penugasan_id, nominal_rencana');
 
-      // Filter hanya memengaruhi tampilan, bukan perhitungan limit bulanan.
+      if (pencairanTotalsError) throw pencairanTotalsError;
+
+      const totalsByPenugasan: Record<number, number> = {};
+
+      (pencairanTotals || []).forEach((row: any) => {
+        const penugasanId = Number(row.penugasan_id);
+        if (!Number.isFinite(penugasanId)) return;
+        totalsByPenugasan[penugasanId] =
+          (totalsByPenugasan[penugasanId] || 0) + (Number(row.nominal_rencana) || 0);
+      });
+
+      const allData: PenugasanData[] = (data || []).map((item: any) => ({
+        ...item,
+        totalRencana: totalsByPenugasan[Number(item.id)] || 0,
+      }));
+
+      setPenugasanListRaw(allData);
+
       let filteredData: PenugasanData[] = [...allData];
 
       if (statusFilter !== 'Semua Status') {
@@ -473,6 +421,7 @@ export default function PenugasanPage() {
       setSelectedIds([]);
     } catch (error: any) {
       console.error('Error fetching penugasan:', error);
+      alert('Gagal memuat data penugasan: ' + (error?.message || 'Terjadi kesalahan'));
     } finally {
       setLoading(false);
     }
@@ -486,49 +435,6 @@ export default function PenugasanPage() {
     fetchPenugasan();
   }, [fetchPenugasan]);
 
-  // Handler pencarian limit berdasarkan periode bulan. 
-  // Jika belum disetting di database, mengembalikan null agar sistem tahu bahwa limit belum diisi.
-  const getLimitObjectForPeriode = useCallback(
-    (periode: string) => {
-      return limitList.find((row) => isMatchingMonth(periode, row.bulan_periode)) || null;
-    },
-    [limitList]
-  );
-
-  const accumulatedHonorBySobatPeriode = useMemo(() => {
-    const map: Record<string, number> = {};
-    allPenugasanList.forEach((item) => {
-      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (months.length === 0) return;
-      const honorPerBulan = (Number(item.total_honor) || 0) / jumlahBulan;
-      months.forEach((bulan) => {
-        const key = `${item.sobat_id}__${bulan}`;
-        map[key] = (map[key] || 0) + honorPerBulan;
-      });
-    });
-    return map;
-  }, [allPenugasanList]);
-
-  const accumulatedDicairkanBySobatPeriode = useMemo(() => {
-    const map: Record<string, number> = {};
-    allPenugasanList.forEach((item) => {
-      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (months.length === 0) return;
-      const dicairkanPerBulan = (Number(item.jumlah_dicairkan) || 0) / jumlahBulan;
-      months.forEach((bulan) => {
-        const key = `${item.sobat_id}__${bulan}`;
-        map[key] = (map[key] || 0) + dicairkanPerBulan;
-      });
-    });
-    return map;
-  }, [allPenugasanList]);
-
-  const currentFormPeriodeInfo = useMemo(() => {
-    const kegiatan = kegiatanOptions.find((k) => k.id === formData.kegiatan_id);
-    const raw = kegiatan?.bulan_kegiatan || kegiatanOptions[0]?.bulan_kegiatan || '';
-    return parseBulanKegiatan(raw);
-  }, [formData.kegiatan_id, kegiatanOptions]);
-
   // =========================================================
   // MITRA AKTIF vs NONAKTIF
   // =========================================================
@@ -538,8 +444,6 @@ export default function PenugasanPage() {
     );
   }, [mitraOptions, isEditMode, formData.sobat_id]);
 
-  // Daftar mitra yang ditampilkan di dropdown pencarian, sudah difilter
-  // berdasarkan kata kunci yang diketik (nama atau SOBAT ID).
   const filteredMitraOptionsForCombobox = useMemo(() => {
     const kw = mitraSearchKeyword.trim().toLowerCase();
     if (!kw) return selectableMitraOptions;
@@ -553,73 +457,15 @@ export default function PenugasanPage() {
     [mitraOptions, formData.sobat_id]
   );
 
-  // Cek mitra SUDAH limit dari penugasan LAIN (tanpa memperhitungkan honor baru yang sedang diisi)
-  const checkMitraLimitStatus = useCallback(
-    (sobatId: string, periodeInfo: PeriodeKegiatan, excludePenugasanId?: number): LimitBlockedInfo | null => {
-      if (!sobatId || periodeInfo.months.length === 0) return null;
-
-      for (const bulan of periodeInfo.months) {
-        const limitObj = getLimitObjectForPeriode(bulan);
-
-        // Jika limit bulan tersebut belum disetting di database, blokir dan arahkan untuk isi limit dulu
-        if (!limitObj) {
-          const mitraInfo = mitraOptions.find((m) => m.sobat_id === sobatId);
-          return {
-            namaMitra: mitraInfo?.nama_mitra || sobatId,
-            periode: bulan,
-            limitBulanan: 0,
-            hakHonorAlokasi: 0,
-            sudahDicairkan: 0,
-            sisaLimit: 0,
-            persenTerpakai: 0,
-            sebab: 'belum_setting_limit',
-          };
-        }
-
-        const maxLimit = limitObj.batas_maksimal;
-        let existingTotal = 0;
-        let existingDicairkan = 0;
-
-        allPenugasanList.forEach((item) => {
-          if (item.sobat_id !== sobatId) return;
-          if (excludePenugasanId && item.id === excludePenugasanId) return;
-          const itemPeriode = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-          if (!itemPeriode.months.includes(bulan)) return;
-          existingTotal += (Number(item.total_honor) || 0) / itemPeriode.jumlahBulan;
-          existingDicairkan += (Number(item.jumlah_dicairkan) || 0) / itemPeriode.jumlahBulan;
-        });
-
-        if (existingTotal >= maxLimit) {
-          const mitraInfo = mitraOptions.find((m) => m.sobat_id === sobatId);
-          return {
-            namaMitra: mitraInfo?.nama_mitra || sobatId,
-            periode: bulan,
-            limitBulanan: maxLimit,
-            hakHonorAlokasi: existingTotal,
-            sudahDicairkan: existingDicairkan,
-            sisaLimit: Math.max(maxLimit - existingTotal, 0),
-            persenTerpakai: Math.round((existingTotal / maxLimit) * 100),
-            sebab: 'sudah_limit',
-          };
-        }
-      }
-
-      return null;
-    },
-    [allPenugasanList, mitraOptions, getLimitObjectForPeriode]
-  );
-
   const checkDuplicateAssignment = useCallback(
     (sobatId: string, kegiatanId: number, excludePenugasanId?: number): DuplicateBlockedInfo | null => {
       if (!sobatId || !kegiatanId) return null;
-
-      const existing = penugasanList.find(
+      const existing = penugasanListRaw.find(
         (item) =>
           item.sobat_id === sobatId &&
           item.kegiatan_id === kegiatanId &&
           (!excludePenugasanId || item.id !== excludePenugasanId)
       );
-
       if (existing) {
         const mitraInfo = mitraOptions.find((m) => m.sobat_id === sobatId);
         const kegiatanInfo = kegiatanOptions.find((k) => k.id === kegiatanId);
@@ -628,42 +474,23 @@ export default function PenugasanPage() {
           namaKegiatan: kegiatanInfo?.nama_kegiatan || 'kegiatan ini',
         };
       }
-
       return null;
     },
-    [penugasanList, mitraOptions, kegiatanOptions]
+    [penugasanListRaw, mitraOptions, kegiatanOptions]
   );
 
   const handleSelectMitraInForm = (sobatId: string) => {
-    const blockedLimit = checkMitraLimitStatus(sobatId, currentFormPeriodeInfo, isEditMode ? formData.id : undefined);
-    if (blockedLimit) {
-      setLimitBlockedInfo(blockedLimit);
-      setIsLimitBlockedModalOpen(true);
-      return;
-    }
-
     const blockedDuplicate = checkDuplicateAssignment(sobatId, formData.kegiatan_id, isEditMode ? formData.id : undefined);
     if (blockedDuplicate) {
       setDuplicateBlockedInfo(blockedDuplicate);
       setIsDuplicateBlockedModalOpen(true);
       return;
     }
-
     setFormData((prev) => ({ ...prev, sobat_id: sobatId }));
   };
 
   const handleSelectKegiatanInForm = (kegiatanId: number) => {
-    const kegiatanTerpilih = kegiatanOptions.find((k) => k.id === kegiatanId);
-    const periodeInfoBaru = parseBulanKegiatan(kegiatanTerpilih?.bulan_kegiatan);
-
     if (formData.sobat_id) {
-      const blockedLimit = checkMitraLimitStatus(formData.sobat_id, periodeInfoBaru, isEditMode ? formData.id : undefined);
-      if (blockedLimit) {
-        setLimitBlockedInfo(blockedLimit);
-        setIsLimitBlockedModalOpen(true);
-        return;
-      }
-
       const blockedDuplicate = checkDuplicateAssignment(formData.sobat_id, kegiatanId, isEditMode ? formData.id : undefined);
       if (blockedDuplicate) {
         setDuplicateBlockedInfo(blockedDuplicate);
@@ -671,185 +498,169 @@ export default function PenugasanPage() {
         return;
       }
     }
-
     setFormData((prev) => ({ ...prev, kegiatan_id: kegiatanId }));
   };
 
-  interface BulanProyeksi {
-    bulan: string;
-    currentTotal: number;
-    newTotal: number;
-    maxLimit: number;
-    warnPercent: number;
-    isExceeded: boolean;
-    isWarning: boolean;
-    isUnset: boolean;
-    usagePercent: number;
-  }
+  const currentFormPeriodeInfo = useMemo(() => {
+    const kegiatan = kegiatanOptions.find((k) => k.id === formData.kegiatan_id);
+    const raw = kegiatan?.bulan_kegiatan || kegiatanOptions[0]?.bulan_kegiatan || '';
+    return parseBulanKegiatan(raw);
+  }, [formData.kegiatan_id, kegiatanOptions]);
 
-  const formLimitCheck = useMemo(() => {
-    const periodeInfo = currentFormPeriodeInfo;
+  // Total penggunaan limit per (mitra, bulan) — lintas semua penugasan.
+  //
+  // ATURAN SAMA DENGAN /pencairan:
+  // - Belum terealisasi  -> tetap membebani BULAN RENCANA.
+  // - Sudah terealisasi -> berpindah membebani BULAN TANGGAL REALISASI.
+  //
+  // Jadi contoh: rencana September Rp3 jt, lalu direalisasikan 10 Oktober,
+  // September tidak lagi dianggap terpakai oleh pencairan tersebut;
+  // Rp3 jt dihitung ke limit Oktober.
+  const totalRencanaByMitraBulanRef = useMemo(() => {
+    const map: Record<string, number> = {};
 
-    if (!formData.sobat_id || periodeInfo.months.length === 0) {
-      return {
-        maxLimit: 0,
-        isExceeded: false,
-        isWarning: false,
-        isUnset: false,
-        honorPerBulan: 0,
-        perBulan: [] as BulanProyeksi[],
-        worst: null as BulanProyeksi | null,
-      };
-    }
+    pencairanRefList.forEach((r) => {
+      const sudahRealisasi =
+        r.nominal_dicairkan !== null &&
+        r.nominal_dicairkan !== undefined;
 
-    const honorPerBulan = (Number(formData.total_honor) || 0) / periodeInfo.jumlahBulan;
+      const bulanPenggunaan =
+        sudahRealisasi && r.tgl_pencairan
+          ? dateToMonthLabel(r.tgl_pencairan)
+          : r.bulan_pencairan;
 
-    const perBulan: BulanProyeksi[] = periodeInfo.months.map((bulan) => {
-      const limitObj = getLimitObjectForPeriode(bulan);
-      const isUnset = !limitObj;
-      const maxLimit = limitObj?.batas_maksimal ?? 0;
-      const warnPercent = limitObj?.persen_peringatan ?? DEFAULT_WARN_PERCENT;
+      if (!bulanPenggunaan) return;
 
-      let currentTotal = 0;
-      allPenugasanList.forEach((item) => {
-        if (item.sobat_id !== formData.sobat_id) return;
-        if (isEditMode && item.id === formData.id) return;
-        const itemPeriode = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-        if (!itemPeriode.months.includes(bulan)) return;
-        currentTotal += (Number(item.total_honor) || 0) / itemPeriode.jumlahBulan;
-      });
+      const nominal = sudahRealisasi
+        ? Number(r.nominal_dicairkan) || 0
+        : Number(r.nominal_rencana) || 0;
 
-      const newTotal = currentTotal + honorPerBulan;
-      const usagePercent = maxLimit > 0 ? (newTotal / maxLimit) * 100 : 0;
-      const isExceeded = isUnset || newTotal > maxLimit;
-      const isWarning = !isUnset && !isExceeded && usagePercent >= warnPercent;
-
-      return {
-        bulan,
-        currentTotal,
-        newTotal,
-        maxLimit,
-        warnPercent,
-        isExceeded,
-        isWarning,
-        isUnset,
-        usagePercent,
-      };
+      const key = `${r.sobat_id}__${bulanPenggunaan}`;
+      map[key] = (map[key] || 0) + nominal;
     });
 
-    const isUnset = perBulan.some((b) => b.isUnset);
-    const isExceeded = isUnset || perBulan.some((b) => b.isExceeded);
-    const isWarning = !isExceeded && perBulan.some((b) => b.isWarning);
-    const worst = perBulan.reduce<BulanProyeksi | null>(
-      (acc, b) => (!acc || b.usagePercent > acc.usagePercent ? b : acc),
-      null
-    );
+    return map;
+  }, [pencairanRefList]);
 
-    return {
-      maxLimit: worst?.maxLimit ?? 0,
-      isExceeded,
-      isWarning,
-      isUnset,
-      honorPerBulan,
-      perBulan,
-      worst,
-    };
-  }, [
-    formData.sobat_id,
-    formData.total_honor,
-    formData.id,
-    formData.kegiatan_id,
-    isEditMode,
-    allPenugasanList,
-    currentFormPeriodeInfo,
-    getLimitObjectForPeriode,
-  ]);
-
-  // focusBulan = nama bulan (tanpa tahun) yang sedang aktif di filter "Pilih Bulan".
-  const getRowLimitSummary = useCallback(
-    (item: PenugasanData, focusBulan?: string) => {
-      const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (periodeInfo.months.length === 0) {
-        return {
-          label: '-',
-          jumlahBulan: 0,
-          honorPerBulan: 0,
-          worstUsageRatio: 0,
-          worstWarnPercent: DEFAULT_WARN_PERCENT,
-          sisaLimitMin: 0,
-          hasUnsetLimit: false,
-          perMonth: [] as {
-            bulan: string;
-            sisa: number;
-            usageRatio: number;
-            warnPercent: number;
-            isUnset: boolean;
-          }[],
-          focusBulan: undefined as string | undefined,
-        };
-      }
-
-      const honorPerBulan = (Number(item.total_honor) || 0) / periodeInfo.jumlahBulan;
-
-      const bulanUntukDihitung = focusBulan
-        ? periodeInfo.months.filter(
-            (bulanLengkap) =>
-              (bulanLengkap.split(' ')[0] || '').toLowerCase() === focusBulan.toLowerCase()
-          )
-        : periodeInfo.months;
-
-      const bulanEfektif = bulanUntukDihitung.length > 0 ? bulanUntukDihitung : periodeInfo.months;
-
-      let worstUsageRatio = 0;
-      let worstWarnPercent = DEFAULT_WARN_PERCENT;
-      let sisaLimitMin = Infinity;
-      let hasUnsetLimit = false;
-
-      const perMonth: { bulan: string; sisa: number; usageRatio: number; warnPercent: number; isUnset: boolean }[] = [];
-
-      periodeInfo.months.forEach((bulan) => {
-        const limitObj = getLimitObjectForPeriode(bulan);
-        const totalAllocated = accumulatedHonorBySobatPeriode[`${item.sobat_id}__${bulan}`] || 0;
-
-        if (!limitObj) {
-          perMonth.push({ bulan, sisa: 0, usageRatio: 0, warnPercent: DEFAULT_WARN_PERCENT, isUnset: true });
-          if (bulanEfektif.includes(bulan)) hasUnsetLimit = true;
-          return;
-        }
-
-        const maxLimit = limitObj.batas_maksimal;
-        const warnPercent = limitObj.persen_peringatan;
-        const usageRatio = maxLimit > 0 ? (totalAllocated / maxLimit) * 100 : 0;
-        const sisa = maxLimit - totalAllocated;
-
-        perMonth.push({ bulan, sisa, usageRatio, warnPercent, isUnset: false });
-
-        if (!bulanEfektif.includes(bulan)) return;
-
-        if (usageRatio > worstUsageRatio) {
-          worstUsageRatio = usageRatio;
-          worstWarnPercent = warnPercent;
-        }
-        if (sisa < sisaLimitMin) sisaLimitMin = sisa;
-      });
-
-      return {
-        label: periodeInfo.label,
-        jumlahBulan: periodeInfo.jumlahBulan,
-        honorPerBulan,
-        worstUsageRatio,
-        worstWarnPercent,
-        sisaLimitMin: sisaLimitMin === Infinity ? 0 : sisaLimitMin,
-        hasUnsetLimit,
-        perMonth,
-        focusBulan: bulanUntukDihitung.length > 0 ? focusBulan : undefined,
-      };
+  const getLimitObjectForPeriode = useCallback(
+    (periode: string) => {
+      const target = (periode || '').trim().toLowerCase();
+      return limitRefList.find((l) => (l.bulan_periode || '').trim().toLowerCase() === target) || null;
     },
-    [accumulatedHonorBySobatPeriode, getLimitObjectForPeriode]
+    [limitRefList]
   );
 
+  // Tabel referensi sisa limit per bulan untuk mitra yang sedang dipilih.
+  // Penggunaan dihitung dengan aturan yang sama seperti /pencairan:
+  // rencana memakai bulan rencana, realisasi memakai bulan tgl_pencairan.
+  const limitReferenceRows = useMemo(() => {
+    if (!formData.sobat_id || currentFormPeriodeInfo.months.length === 0) return [];
+    return currentFormPeriodeInfo.months.map((bulanLabel) => {
+      const limitObj = getLimitObjectForPeriode(bulanLabel);
+      const used = totalRencanaByMitraBulanRef[`${formData.sobat_id}__${bulanLabel}`] || 0;
+      const limit = limitObj ? Number(limitObj.batas_maksimal) : null;
+      const sisa = limit !== null ? limit - used : null;
+      return { bulanLabel, limit, used, sisa, unset: limit === null };
+    });
+  }, [formData.sobat_id, currentFormPeriodeInfo.months, getLimitObjectForPeriode, totalRencanaByMitraBulanRef]);
+
+  // BLOKIR KERAS di form: kalau SEMUA bulan periode kegiatan sudah penuh
+  // untuk mitra ini, Penugasan tidak boleh disimpan.
+  const isPenugasanBlockedByLimit = useMemo(() => {
+    if (limitReferenceRows.length === 0) return false;
+    return limitReferenceRows.every((r) => !r.unset && r.sisa !== null && r.sisa <= 0);
+  }, [limitReferenceRows]);
+
+  // =========================================================
+  // STATUS LIMIT PER BULAN UNTUK 1 BARIS PENUGASAN (inti perbaikan)
+  // =========================================================
+  // Mengembalikan status TIAP bulan yang dilingkupi periode kegiatan baris
+  // ini, untuk mitra baris itu. Kalau focusBulan diisi (mis. sedang
+  // memfilter "Bulan: September"), hanya bulan itu yang dihitung — supaya
+  // konsisten dengan filter yang sedang aktif di tabel.
+  const getRowMonthStatuses = useCallback(
+    (item: PenugasanData, focusBulanName?: string): MonthLimitStatus[] => {
+      const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+      const monthsToShow = focusBulanName
+        ? periodeInfo.months.filter((m) => (m.split(' ')[0] || '').toLowerCase() === focusBulanName.toLowerCase())
+        : periodeInfo.months;
+
+      return monthsToShow.map((bulan) => {
+        const limitObj = getLimitObjectForPeriode(bulan);
+        const used = totalRencanaByMitraBulanRef[`${item.sobat_id}__${bulan}`] || 0;
+
+        if (!limitObj) {
+          return {
+            bulan,
+            limit: null,
+            used,
+            sisa: null,
+            warnPercent: DEFAULT_WARN_PERCENT,
+            isUnset: true,
+            isFull: false,
+            isWarning: false,
+          };
+        }
+
+        const limit = Number(limitObj.batas_maksimal);
+        const warnPercent = Number(limitObj.persen_peringatan) || DEFAULT_WARN_PERCENT;
+        const sisa = limit - used;
+        const usagePercent = limit > 0 ? (used / limit) * 100 : 0;
+        const isFull = sisa <= 0;
+        const isWarning = !isFull && usagePercent >= warnPercent;
+
+        return { bulan, limit, used, sisa, warnPercent, isUnset: false, isFull, isWarning };
+      });
+    },
+    [getLimitObjectForPeriode, totalRencanaByMitraBulanRef]
+  );
+
+  // Ringkasan badge 1 baris kegiatan: menghitung proporsi bulan yang benar-
+  // benar penuh/mendekati/belum diset — TIDAK menyamaratakan seluruh
+  // periode hanya karena satu bulan bermasalah.
+  const getRowLimitBadge = useCallback(
+    (item: PenugasanData, focusBulanName?: string) => {
+      const statuses = getRowMonthStatuses(item, focusBulanName);
+      if (statuses.length === 0) return null;
+
+      const total = statuses.length;
+      const unsetCount = statuses.filter((s) => s.isUnset).length;
+      const fullCount = statuses.filter((s) => !s.isUnset && s.isFull).length;
+      const warnCount = statuses.filter((s) => !s.isUnset && !s.isFull && s.isWarning).length;
+
+      if (unsetCount > 0) {
+        return {
+          label: total > 1 ? `Belum Disetting (${unsetCount}/${total} bln)` : 'Belum Disetting',
+          style: 'bg-purple-50 text-purple-700 border-purple-200',
+          icon: '🟣',
+        };
+      }
+      if (fullCount > 0) {
+        return {
+          label: total > 1 ? `${fullCount}/${total} Bulan Penuh` : 'Limit Penuh',
+          style: 'bg-rose-50 text-rose-700 border-rose-200',
+          icon: '🔴',
+        };
+      }
+      if (warnCount > 0) {
+        return {
+          label: total > 1 ? `${warnCount}/${total} Bulan Mendekati` : 'Mendekati Limit',
+          style: 'bg-amber-50 text-amber-700 border-amber-200',
+          icon: '🟡',
+        };
+      }
+      return { label: 'Aman', style: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: '🟢' };
+    },
+    [getRowMonthStatuses]
+  );
+
+  // Bulan spesifik yang sedang difilter di dropdown "Pilih Bulan". undefined
+  // artinya "Semua Bulan" (semua bulan periode kegiatan tetap dihitung).
   const activeFocusBulan = bulanFilter !== 'Semua Bulan' ? bulanFilter : undefined;
 
+  // =========================================================
+  // GROUPING PER MITRA (supaya 1 mitra = 1 baris, bisa expand)
+  // =========================================================
   const groupedByMitra = useMemo<MitraGroup[]>(() => {
     const map = new Map<string, MitraGroup>();
 
@@ -860,45 +671,84 @@ export default function PenugasanPage() {
           sobat_id: key,
           mitra: item.mitra,
           items: [],
-          totalAlokasi: 0,
-          totalDicairkan: 0,
-          totalSisaHonor: 0,
-          worstUsageRatio: 0,
-          worstWarnPercent: DEFAULT_WARN_PERCENT,
+          totalRencana: 0,
         });
       }
       const group = map.get(key)!;
       group.items.push(item);
-      group.totalAlokasi += Number(item.total_honor) || 0;
-      group.totalDicairkan += Number(item.jumlah_dicairkan) || 0;
+      group.totalRencana += Number(item.totalRencana) || 0;
     });
 
     const groups = Array.from(map.values()).map((group) => {
-      group.totalSisaHonor = group.totalAlokasi - group.totalDicairkan;
-
-      let worstRatio = 0;
-      let worstWarn = DEFAULT_WARN_PERCENT;
-      group.items.forEach((item) => {
-        const summary = getRowLimitSummary(item, activeFocusBulan);
-        if (summary.worstUsageRatio > worstRatio) {
-          worstRatio = summary.worstUsageRatio;
-          worstWarn = summary.worstWarnPercent;
-        }
-      });
-      group.worstUsageRatio = worstRatio;
-      group.worstWarnPercent = worstWarn;
-
       group.items = [...group.items].sort((a, b) =>
         (a.kegiatan?.nama_kegiatan || '').localeCompare(b.kegiatan?.nama_kegiatan || '')
       );
-
       return group;
     });
 
     groups.sort((a, b) => (a.mitra?.nama_mitra || '').localeCompare(b.mitra?.nama_mitra || ''));
-
     return groups;
-  }, [penugasanList, getRowLimitSummary, activeFocusBulan]);
+  }, [penugasanList]);
+
+  // Ringkasan status limit level-mitra: agregat proporsi BULAN UNIK yang
+  // bermasalah dari SELURUH kegiatan mitra itu (menghormati filter bulan
+  // yang aktif).
+  //
+  // PENTING (fix): kalau satu mitra punya beberapa kegiatan yang periode-
+  // nya sama-sama menyentuh bulan yang sama (mis. kegiatan A hanya
+  // September, kegiatan B September-Oktober), bulan "September" itu HANYA
+  // SATU limit bucket (limit honor per mitra per bulan dipakai bersama
+  // lintas kegiatan) — jadi tidak boleh dihitung dua kali di ringkasan
+  // mitra. Makanya di sini bulan yang sama di-dedupe dulu sebelum
+  // dihitung proporsinya.
+  const getGroupLimitBadge = useCallback(
+    (group: MitraGroup) => {
+      const monthStatusMap = new Map<string, MonthLimitStatus>();
+
+      group.items.forEach((item) => {
+        const statuses = getRowMonthStatuses(item, activeFocusBulan);
+        statuses.forEach((s) => {
+          // Kalau bulan ini sudah pernah dicatat dari kegiatan lain,
+          // lewati — statusnya pasti sama karena dihitung dari key
+          // sobat_id + bulan yang identik.
+          if (!monthStatusMap.has(s.bulan)) {
+            monthStatusMap.set(s.bulan, s);
+          }
+        });
+      });
+
+      const uniqueStatuses = Array.from(monthStatusMap.values());
+      const total = uniqueStatuses.length;
+      const unsetCount = uniqueStatuses.filter((s) => s.isUnset).length;
+      const fullCount = uniqueStatuses.filter((s) => !s.isUnset && s.isFull).length;
+      const warnCount = uniqueStatuses.filter((s) => !s.isUnset && !s.isFull && s.isWarning).length;
+
+      if (total === 0) return { label: '-', style: 'bg-slate-50 text-slate-400 border-slate-200', icon: '' };
+      if (unsetCount > 0) {
+        return {
+          label: total > 1 ? `Belum Disetting (${unsetCount}/${total} bln)` : 'Belum Disetting',
+          style: 'bg-purple-50 text-purple-700 border-purple-200',
+          icon: '🟣',
+        };
+      }
+      if (fullCount > 0) {
+        return {
+          label: total > 1 ? `${fullCount}/${total} Bulan Penuh` : 'Limit Penuh',
+          style: 'bg-rose-50 text-rose-700 border-rose-200',
+          icon: '🔴',
+        };
+      }
+      if (warnCount > 0) {
+        return {
+          label: total > 1 ? `${warnCount}/${total} Bulan Mendekati` : 'Mendekati Limit',
+          style: 'bg-amber-50 text-amber-700 border-amber-200',
+          icon: '🟡',
+        };
+      }
+      return { label: 'Aman', style: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: '🟢' };
+    },
+    [getRowMonthStatuses, activeFocusBulan]
+  );
 
   const totalMitraCount = groupedByMitra.length;
   const totalPenugasanCount = penugasanList.length;
@@ -917,11 +767,8 @@ export default function PenugasanPage() {
     [currentGroups]
   );
 
-  const isAllCurrentPageSelected =
-    currentItemIds.length > 0 && currentItemIds.every((id) => selectedIds.includes(id));
-
-  const isSomeCurrentPageSelected =
-    currentItemIds.some((id) => selectedIds.includes(id)) && !isAllCurrentPageSelected;
+  const isAllCurrentPageSelected = currentItemIds.length > 0 && currentItemIds.every((id) => selectedIds.includes(id));
+  const isSomeCurrentPageSelected = currentItemIds.some((id) => selectedIds.includes(id)) && !isAllCurrentPageSelected;
 
   const handleToggleSelectOne = (id: number) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]));
@@ -938,9 +785,7 @@ export default function PenugasanPage() {
   const handleToggleSelectGroup = (groupItemIds: number[]) => {
     const allSelected = groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
     setSelectedIds((prev) => {
-      if (allSelected) {
-        return prev.filter((id) => !groupItemIds.includes(id));
-      }
+      if (allSelected) return prev.filter((id) => !groupItemIds.includes(id));
       return Array.from(new Set([...prev, ...groupItemIds]));
     });
   };
@@ -950,35 +795,29 @@ export default function PenugasanPage() {
   const handleToggleExpand = (sobatId: string) => {
     setExpandedMitraIds((prev) => {
       const next = new Set(prev);
-      if (next.has(sobatId)) {
-        next.delete(sobatId);
-      } else {
-        next.add(sobatId);
-      }
+      if (next.has(sobatId)) next.delete(sobatId);
+      else next.add(sobatId);
       return next;
     });
   };
 
-  const handleExpandAll = () => {
-    setExpandedMitraIds(new Set(groupedByMitra.map((g) => g.sobat_id)));
-  };
-
-  const handleCollapseAll = () => {
-    setExpandedMitraIds(new Set());
-  };
+  const handleExpandAll = () => setExpandedMitraIds(new Set(groupedByMitra.map((g) => g.sobat_id)));
+  const handleCollapseAll = () => setExpandedMitraIds(new Set());
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-
-    const confirmDelete = window.confirm(`Apakah Anda yakin ingin menghapus ${selectedIds.length} penugasan terpilih?`);
-    if (!confirmDelete) return;
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus ${selectedIds.length} penugasan terpilih?`)) return;
 
     setIsBulkDeleting(true);
     try {
       const { error } = await supabase.from('penugasan').delete().in('id', selectedIds);
       if (error) throw error;
-
       alert(`${selectedIds.length} penugasan berhasil dihapus.`);
+      await logActivity({
+        aksi: 'hapus',
+        entitas: 'penugasan',
+        deskripsi: `Menghapus ${selectedIds.length} penugasan sekaligus`,
+      });
       setSelectedIds([]);
       fetchPenugasan();
     } catch (error: any) {
@@ -990,17 +829,16 @@ export default function PenugasanPage() {
 
   const handleBulkStatusChange = async () => {
     if (selectedIds.length === 0) return;
-
     setIsBulkStatusSubmitting(true);
     try {
-      const { error } = await supabase
-        .from('penugasan')
-        .update({ status_penugasan: bulkStatusValue })
-        .in('id', selectedIds);
-
+      const { error } = await supabase.from('penugasan').update({ status_penugasan: bulkStatusValue }).in('id', selectedIds);
       if (error) throw error;
-
       alert(`Status ${selectedIds.length} penugasan berhasil diubah menjadi "${bulkStatusValue}".`);
+      await logActivity({
+        aksi: 'ubah',
+        entitas: 'penugasan',
+        deskripsi: `Mengubah status ${selectedIds.length} penugasan sekaligus menjadi "${bulkStatusValue}"`,
+      });
       setIsBulkStatusModalOpen(false);
       setSelectedIds([]);
       fetchPenugasan();
@@ -1011,6 +849,8 @@ export default function PenugasanPage() {
     }
   };
 
+  const formatRupiah = (val: number) => `Rp ${val.toLocaleString('id-ID')}`;
+
   const handleExportPDF = () => {
     if (penugasanList.length === 0) {
       alert('Tidak ada data penugasan untuk diexport.');
@@ -1018,7 +858,6 @@ export default function PenugasanPage() {
     }
 
     const doc = new jsPDF('landscape', 'mm', 'a4');
-
     doc.setFontSize(14);
     doc.text('BADAN PUSAT STATISTIK KOTA MOJOKERTO', 14, 15);
     doc.setFontSize(10);
@@ -1044,15 +883,13 @@ export default function PenugasanPage() {
       item.mitra?.nama_mitra || '-',
       item.kegiatan?.nama_kegiatan || '-',
       item.mitra?.posisi_mitra || '-',
-      `Rp ${(item.total_honor || 0).toLocaleString('id-ID')}`,
-      `Rp ${(item.jumlah_dicairkan || 0).toLocaleString('id-ID')}`,
-      `Rp ${((item.total_honor || 0) - (item.jumlah_dicairkan || 0)).toLocaleString('id-ID')}`,
+      `Rp ${(item.totalRencana || 0).toLocaleString('id-ID')}`,
       item.status_penugasan || 'Ditugaskan',
     ]);
 
     autoTable(doc, {
       startY: 36,
-      head: [['No', 'SOBAT ID', 'Nama Mitra', 'Kegiatan BPS', 'Posisi Mitra', 'Hak Honor Alokasi', 'Dicairkan', 'Sisa Honor', 'Status']],
+      head: [['No', 'SOBAT ID', 'Nama Mitra', 'Kegiatan BPS', 'Posisi Mitra', 'Total Rencana', 'Status']],
       body: tableBody,
       theme: 'grid',
       headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontSize: 8, fontStyle: 'bold' },
@@ -1064,9 +901,7 @@ export default function PenugasanPage() {
         3: { cellWidth: 55 },
         4: { cellWidth: 35 },
         5: { cellWidth: 30, halign: 'right' },
-        6: { cellWidth: 30, halign: 'right' },
-        7: { cellWidth: 30, halign: 'right' },
-        8: { cellWidth: 20, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center' },
       },
     });
 
@@ -1075,20 +910,12 @@ export default function PenugasanPage() {
 
   const handleOpenAddModal = () => {
     setIsEditMode(false);
-
     const defaultKegiatanId = kegiatanOptions[0]?.id || 0;
-    const defaultPeriodeInfo = parseBulanKegiatan(kegiatanOptions[0]?.bulan_kegiatan);
-
-    // Hanya pilih mitra AKTIF sebagai default saat membuka form Tambah Penugasan.
-    const firstAvailableMitra = mitraOptions.find(
-      (m) => m.status_keaktifan !== 'Nonaktif' && !checkMitraLimitStatus(m.sobat_id, defaultPeriodeInfo)
-    );
+    const firstAvailableMitra = mitraOptions.find((m) => m.status_keaktifan !== 'Nonaktif');
 
     setFormData({
       sobat_id: firstAvailableMitra?.sobat_id || '',
       kegiatan_id: defaultKegiatanId,
-      total_honor: 0,
-      jumlah_dicairkan: 0,
       status_penugasan: 'Ditugaskan',
     });
     setMitraSearchKeyword('');
@@ -1102,8 +929,6 @@ export default function PenugasanPage() {
       id: penugasan.id,
       sobat_id: penugasan.sobat_id,
       kegiatan_id: penugasan.kegiatan_id,
-      total_honor: penugasan.total_honor || 0,
-      jumlah_dicairkan: penugasan.jumlah_dicairkan || 0,
       status_penugasan: penugasan.status_penugasan || 'Ditugaskan',
     });
     setMitraSearchKeyword('');
@@ -1126,41 +951,11 @@ export default function PenugasanPage() {
       return;
     }
 
-    const blockedLimit = checkMitraLimitStatus(formData.sobat_id, currentFormPeriodeInfo, isEditMode ? formData.id : undefined);
-    if (blockedLimit) {
-      setLimitBlockedInfo(blockedLimit);
-      setIsLimitBlockedModalOpen(true);
-      return;
-    }
-
-    const honorAllocated = Number(formData.total_honor) || 0;
-    const honorDisbursed = Number(formData.jumlah_dicairkan) || 0;
-
-    if (honorDisbursed > honorAllocated) {
+    if (isPenugasanBlockedByLimit) {
       alert(
-        `Gagal Menyimpan! Jumlah yang dicairkan (Rp ${honorDisbursed.toLocaleString('id-ID')}) tidak boleh melebihi Hak Honor Alokasi (Rp ${honorAllocated.toLocaleString('id-ID')}).`
+        'Penugasan tidak dapat disimpan: limit honor mitra ini sudah penuh di seluruh bulan periode kegiatan ini. ' +
+          'Pilih kegiatan lain, atau tunggu sampai ada bulan dengan sisa limit.'
       );
-      return;
-    }
-
-    if (formLimitCheck.isExceeded) {
-      const mitraInfo = mitraOptions.find((m) => m.sobat_id === formData.sobat_id);
-      const worstBulan = formLimitCheck.perBulan.find((b) => b.isExceeded || b.isUnset) || formLimitCheck.worst;
-      const dicairkanSaatIni = worstBulan
-        ? accumulatedDicairkanBySobatPeriode[`${formData.sobat_id}__${worstBulan.bulan}`] || 0
-        : 0;
-
-      setLimitBlockedInfo({
-        namaMitra: mitraInfo?.nama_mitra || formData.sobat_id,
-        periode: worstBulan?.bulan || currentFormPeriodeInfo.label,
-        limitBulanan: worstBulan?.maxLimit ?? formLimitCheck.maxLimit,
-        hakHonorAlokasi: worstBulan?.newTotal ?? 0,
-        sudahDicairkan: dicairkanSaatIni,
-        sisaLimit: Math.max((worstBulan?.maxLimit ?? 0) - (worstBulan?.newTotal ?? 0), 0),
-        persenTerpakai: worstBulan ? Math.round(worstBulan.usagePercent) : 0,
-        sebab: worstBulan?.isUnset ? 'belum_setting_limit' : 'akan_melebihi',
-      });
-      setIsLimitBlockedModalOpen(true);
       return;
     }
 
@@ -1169,23 +964,37 @@ export default function PenugasanPage() {
       const payload = {
         sobat_id: formData.sobat_id,
         kegiatan_id: formData.kegiatan_id,
-        total_honor: honorAllocated,
-        jumlah_dicairkan: honorDisbursed,
         status_penugasan: formData.status_penugasan,
       };
+
+      const namaMitra = mitraOptions.find((m) => m.sobat_id === formData.sobat_id)?.nama_mitra || formData.sobat_id;
+      const namaKegiatan = kegiatanOptions.find((k) => k.id === formData.kegiatan_id)?.nama_kegiatan || 'kegiatan';
 
       if (isEditMode && formData.id) {
         const { error } = await supabase.from('penugasan').update(payload).eq('id', formData.id);
         if (error) throw error;
         alert('Penugasan berhasil diperbarui.');
+        await logActivity({
+          aksi: 'ubah',
+          entitas: 'penugasan',
+          deskripsi: `Mengubah penugasan ${namaMitra} pada kegiatan ${namaKegiatan}`,
+          referensiId: formData.id,
+        });
+        setIsModalOpen(false);
+        fetchPenugasan();
       } else {
-        const { error } = await supabase.from('penugasan').insert([payload]);
+        const { data: inserted, error } = await supabase.from('penugasan').insert([payload]).select('id').single();
         if (error) throw error;
-        alert('Penugasan baru berhasil ditambahkan.');
+        await logActivity({
+          aksi: 'tambah',
+          entitas: 'penugasan',
+          deskripsi: `Menugaskan ${namaMitra} ke kegiatan ${namaKegiatan}`,
+          referensiId: inserted?.id,
+        });
+        setIsModalOpen(false);
+        router.push(`/pencairan?penugasan_id=${inserted?.id}`);
+        return;
       }
-
-      setIsModalOpen(false);
-      fetchPenugasan();
     } catch (error: any) {
       alert('Gagal menyimpan penugasan: ' + (error.message || 'Terjadi kesalahan'));
     } finally {
@@ -1195,126 +1004,19 @@ export default function PenugasanPage() {
 
   const handleDeletePenugasan = async (id: number, namaMitra: string) => {
     if (!window.confirm(`Apakah Anda yakin ingin menghapus penugasan untuk "${namaMitra}"?`)) return;
-
     try {
       const { error } = await supabase.from('penugasan').delete().eq('id', id);
       if (error) throw error;
-
       alert('Penugasan berhasil dihapus.');
+      await logActivity({
+        aksi: 'hapus',
+        entitas: 'penugasan',
+        deskripsi: `Menghapus penugasan untuk ${namaMitra}`,
+        referensiId: id,
+      });
       fetchPenugasan();
     } catch (error: any) {
       alert('Gagal menghapus penugasan: ' + (error.message || 'Terjadi kesalahan'));
-    }
-  };
-
-  const formatRupiah = (val: number) => `Rp ${val.toLocaleString('id-ID')}`;
-
-  const formatTanggal = (val: string) => {
-    if (!val) return '-';
-    try {
-      return new Date(val).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
-    } catch {
-      return val;
-    }
-  };
-
-  const totalRiwayatDicairkan = useMemo(
-    () => riwayatPencairan.reduce((sum, r) => sum + (Number(r.nominal_dicairkan) || 0), 0),
-    [riwayatPencairan]
-  );
-
-  const sisaHonorPencairan = useMemo(() => {
-    const totalHonor = Number(pencairanPenugasan?.total_honor) || 0;
-    return Math.max(totalHonor - totalRiwayatDicairkan, 0);
-  }, [pencairanPenugasan, totalRiwayatDicairkan]);
-
-  const nominalPencairanInvalid =
-    (Number(pencairanForm.nominal) || 0) <= 0 || (Number(pencairanForm.nominal) || 0) > sisaHonorPencairan;
-
-  const handleOpenPencairanModal = async (penugasan: PenugasanData) => {
-    if (!penugasan.id) return;
-
-    setPencairanPenugasan(penugasan);
-    setPencairanForm({
-      nominal: 0,
-      tanggal: new Date().toISOString().slice(0, 10),
-      catatan: '',
-    });
-    setIsPencairanModalOpen(true);
-    setIsLoadingRiwayat(true);
-
-    try {
-      const { data, error } = await supabase
-        .from('pencairan_honor')
-        .select('*')
-        .eq('penugasan_id', penugasan.id)
-        .order('tahap_ke', { ascending: true });
-
-      if (error) throw error;
-      setRiwayatPencairan(data || []);
-    } catch (error: any) {
-      console.error('Error fetching riwayat pencairan:', error?.message || error);
-      alert('Gagal memuat riwayat pencairan: ' + (error?.message || 'Terjadi kesalahan'));
-      setRiwayatPencairan([]);
-    } finally {
-      setIsLoadingRiwayat(false);
-    }
-  };
-
-  const handleSavePencairan = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pencairanPenugasan?.id) return;
-
-    const nominal = Number(pencairanForm.nominal) || 0;
-
-    if (nominal <= 0) {
-      alert('Nominal pencairan harus lebih dari 0.');
-      return;
-    }
-
-    if (nominal > sisaHonorPencairan) {
-      alert(
-        `Gagal Menyimpan! Nominal pencairan (${formatRupiah(nominal)}) tidak boleh melebihi sisa honor (${formatRupiah(
-          sisaHonorPencairan
-        )}).`
-      );
-      return;
-    }
-
-    const tanggalObj = new Date(pencairanForm.tanggal);
-    const bulanPencairan = NAMA_BULAN_ID[tanggalObj.getMonth()] || null;
-    const tahapBaru = riwayatPencairan.length + 1;
-
-    setIsPencairanSubmitting(true);
-    try {
-      const { error: insertError } = await supabase.from('pencairan_honor').insert([
-        {
-          sobat_id: pencairanPenugasan.sobat_id,
-          penugasan_id: pencairanPenugasan.id,
-          tgl_pencairan: pencairanForm.tanggal,
-          tahap_ke: tahapBaru,
-          nominal_dicairkan: nominal,
-          bulan_pencairan: bulanPencairan,
-          catatan: pencairanForm.catatan.trim() || null,
-        },
-      ]);
-      if (insertError) throw insertError;
-
-      const newTotalDicairkan = totalRiwayatDicairkan + nominal;
-      const { error: updateError } = await supabase
-        .from('penugasan')
-        .update({ jumlah_dicairkan: newTotalDicairkan })
-        .eq('id', pencairanPenugasan.id);
-      if (updateError) throw updateError;
-
-      alert('Pencairan honor berhasil disimpan.');
-      setIsPencairanModalOpen(false);
-      setPencairanPenugasan(null);
-      fetchPenugasan();
-    } catch (error: any) {
-      alert('Gagal menyimpan pencairan: ' + (error?.message || 'Terjadi kesalahan'));
-    } finally {
-      setIsPencairanSubmitting(false);
     }
   };
 
@@ -1332,8 +1034,8 @@ export default function PenugasanPage() {
                 <h1 className="text-lg font-bold text-slate-800">Penugasan Mitra</h1>
                 <p className="text-[11px] text-slate-500">
                   {loading
-                    ? 'Kelola alokasi penugasan dan akumulasi limit honorarium mitra'
-                    : `${totalMitraCount} mitra • ${totalPenugasanCount} penugasan — dikelompokkan per mitra karena satu mitra bisa mengikuti banyak kegiatan`}
+                    ? 'Kelola penugasan mitra ke kegiatan BPS'
+                    : `${totalMitraCount} mitra • ${totalPenugasanCount} penugasan — total & sisa honor dihitung otomatis dari halaman Pencairan`}
                 </p>
               </div>
 
@@ -1344,7 +1046,6 @@ export default function PenugasanPage() {
                 >
                   <span>➕</span> Buat Penugasan
                 </button>
-
                 <button
                   onClick={handleExportPDF}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-medium rounded-md shadow-sm transition cursor-pointer"
@@ -1357,9 +1058,7 @@ export default function PenugasanPage() {
             <div className="bg-white p-3 rounded-lg shadow-sm border border-slate-200 mb-4 flex flex-wrap gap-2.5 items-center justify-between">
               <div className="flex flex-wrap items-center gap-2 w-full">
                 <div className="relative min-w-[260px]">
-                  <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 pointer-events-none text-slate-400 text-xs">
-                    🔍
-                  </span>
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 pointer-events-none text-slate-400 text-xs">🔍</span>
                   <input
                     type="text"
                     placeholder="Cari Mitra, SOBAT ID, Kegiatan, Posisi"
@@ -1375,9 +1074,7 @@ export default function PenugasanPage() {
                   className="py-1.5 px-2 text-xs border border-slate-200 rounded bg-white text-slate-600 outline-none focus:border-blue-400 cursor-pointer"
                 >
                   {STATUS_OPTIONS.map((st) => (
-                    <option key={st} value={st}>
-                      {st}
-                    </option>
+                    <option key={st} value={st}>{st}</option>
                   ))}
                 </select>
 
@@ -1401,9 +1098,7 @@ export default function PenugasanPage() {
                   className="py-1.5 px-2 text-xs border border-slate-200 rounded bg-white text-slate-600 outline-none focus:border-blue-400 cursor-pointer"
                 >
                   {BULAN_OPTIONS.map((bln) => (
-                    <option key={bln} value={bln}>
-                      {bln}
-                    </option>
+                    <option key={bln} value={bln}>{bln}</option>
                   ))}
                 </select>
 
@@ -1519,60 +1214,14 @@ export default function PenugasanPage() {
                 currentGroups.map((group) => {
                   const isExpanded = expandedMitraIds.has(group.sobat_id);
                   const groupItemIds = group.items.map((i) => i.id!).filter(Boolean);
-                  const isGroupFullySelected =
-                    groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
-                  const isGroupPartiallySelected =
-                    groupItemIds.some((id) => selectedIds.includes(id)) && !isGroupFullySelected;
+                  const isGroupFullySelected = groupItemIds.length > 0 && groupItemIds.every((id) => selectedIds.includes(id));
+                  const isGroupPartiallySelected = groupItemIds.some((id) => selectedIds.includes(id)) && !isGroupFullySelected;
+                  const groupBadge = getGroupLimitBadge(group);
                   const isMitraNonaktif = group.mitra?.status_keaktifan === 'Nonaktif';
 
-                  let totalSlotBulan = 0;
-                  let slotTerlampaui = 0;
-                  let slotWarning = 0;
-                  let slotUnset = 0;
-
-                  group.items.forEach((item) => {
-                    const summary = getRowLimitSummary(item, activeFocusBulan);
-                    const relevantMonths = activeFocusBulan
-                      ? summary.perMonth.filter(
-                          (pm) => (pm.bulan.split(' ')[0] || '').toLowerCase() === activeFocusBulan.toLowerCase()
-                        )
-                      : summary.perMonth;
-
-                    relevantMonths.forEach((pm) => {
-                      totalSlotBulan += 1;
-                      if (pm.isUnset) slotUnset += 1;
-                      else if (pm.usageRatio >= 100) slotTerlampaui += 1;
-                      else if (pm.usageRatio >= pm.warnPercent) slotWarning += 1;
-                    });
-                  });
-
-                  let statusLimitLabel = 'Tersedia';
-                  let statusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-
-                  if (slotUnset > 0) {
-                    statusLimitLabel =
-                      totalSlotBulan > 1 ? `Belum Disetting (${slotUnset}/${totalSlotBulan} bln)` : 'Limit Belum Disetting';
-                    statusStyle = 'bg-purple-50 text-purple-700 border-purple-200';
-                  } else if (slotTerlampaui > 0) {
-                    statusLimitLabel =
-                      totalSlotBulan > 1 ? `${slotTerlampaui}/${totalSlotBulan} Bulan Terlampaui` : 'Limit Terlampaui';
-                    statusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
-                  } else if (slotWarning > 0) {
-                    statusLimitLabel =
-                      totalSlotBulan > 1 ? `${slotWarning}/${totalSlotBulan} Bulan Mendekati` : 'Mendekati Limit';
-                    statusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
-                  }
-
                   return (
-                    <div
-                      key={group.sobat_id}
-                      className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden"
-                    >
-                      <div
-                        className={`flex flex-wrap items-center gap-3 px-4 py-3 ${
-                          isExpanded ? 'bg-slate-50/70 border-b border-slate-200' : ''
-                        }`}
-                      >
+                    <div key={group.sobat_id} className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                      <div className={`flex flex-wrap items-center gap-3 px-4 py-3 ${isExpanded ? 'bg-slate-50/70 border-b border-slate-200' : ''}`}>
                         <input
                           type="checkbox"
                           checked={isGroupFullySelected}
@@ -1588,26 +1237,17 @@ export default function PenugasanPage() {
                           onClick={() => handleToggleExpand(group.sobat_id)}
                           className="flex items-center gap-3 min-w-[220px] flex-1 text-left cursor-pointer"
                         >
-                          <div
-                            className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
-                              isMitraNonaktif ? 'bg-slate-200 text-slate-500' : 'bg-blue-100 text-blue-700'
-                            }`}
-                          >
+                          <div className="w-9 h-9 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-sm shrink-0">
                             {(group.mitra?.nama_mitra || '?').charAt(0).toUpperCase()}
                           </div>
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5">
-                              <div className="font-semibold text-slate-800 text-sm truncate">
-                                {group.mitra?.nama_mitra || '-'}
-                              </div>
+                              <span className="font-semibold text-slate-800 text-sm truncate">{group.mitra?.nama_mitra || '-'}</span>
                               {isMitraNonaktif && (
-                            <span
-                              className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-red-100 text-red-700 border border-red-200"
-                              title="Mitra ini sudah Nonaktif di Data Mitra — data di bawah adalah histori penugasan lama."
-                            >
-                              Nonaktif
-                            </span>
-                          )}
+                                <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-red-100 text-red-700 border border-red-200">
+                                  Nonaktif
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-1.5 text-[11px] text-slate-400 truncate">
                               <span className="font-mono text-blue-600">{group.sobat_id}</span>
@@ -1619,29 +1259,19 @@ export default function PenugasanPage() {
                         <div className="flex items-center gap-4 text-[11px] shrink-0">
                           <div className="text-center">
                             <div className="text-slate-400">Kegiatan</div>
-                            <div className="font-semibold text-slate-700 bg-slate-100 rounded px-1.5">
-                              {group.items.length}
-                            </div>
+                            <div className="font-semibold text-slate-700 bg-slate-100 rounded px-1.5">{group.items.length}</div>
                           </div>
                           <div className="text-right hidden sm:block">
-                            <div className="text-slate-400">Total Alokasi</div>
-                            <div className="font-semibold text-blue-600">{formatRupiah(group.totalAlokasi)}</div>
-                          </div>
-                          <div className="text-right hidden md:block">
-                            <div className="text-slate-400">Dicairkan</div>
-                            <div className="font-semibold text-emerald-600">{formatRupiah(group.totalDicairkan)}</div>
-                          </div>
-                          <div className="text-right hidden lg:block">
-                            <div className="text-slate-400">Sisa</div>
-                            <div className="font-semibold text-amber-600">{formatRupiah(group.totalSisaHonor)}</div>
+                            <div className="text-slate-400">Total Rencana</div>
+                            <div className="font-semibold text-blue-600">{formatRupiah(group.totalRencana)}</div>
                           </div>
                         </div>
 
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-medium border shrink-0 ${statusStyle}`}
-                        >
-                          {statusLimitLabel}
-                        </span>
+                        {groupBadge && (
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-medium border shrink-0 ${groupBadge.style}`}>
+                            {groupBadge.icon} {groupBadge.label}
+                          </span>
+                        )}
 
                         <button
                           type="button"
@@ -1660,73 +1290,22 @@ export default function PenugasanPage() {
                               <tr>
                                 <th className="py-2 px-3.5 w-8"></th>
                                 <th className="py-2 px-3.5">Kegiatan</th>
-                                <th className="py-2 px-3.5 text-right">
-                                  {activeFocusBulan ? `Hak Honor (${activeFocusBulan})` : 'Hak Honor Alokasi'}
-                                </th>
-                                <th className="py-2 px-3.5 text-right">Dicairkan</th>
-                                <th className="py-2 px-3.5 text-right">
-                                  {activeFocusBulan ? `Sisa Honor (${activeFocusBulan})` : 'Sisa Honor'}
-                                </th>
-                                <th className="py-2 px-3.5 text-center">Status Limit</th>
+                                <th className="py-2 px-3.5 text-right">Rencana</th>
+                                <th className="py-2 px-3.5 text-center">Limit</th>
+                                <th className="py-2 px-3.5 text-center">Rencana Pencairan</th>
+                                <th className="py-2 px-3.5 text-center">Status</th>
                                 <th className="py-2 px-3.5 text-center">Aksi</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-50">
                               {group.items.map((item) => {
                                 const isChecked = selectedIds.includes(item.id!);
-                                const rowSummary = getRowLimitSummary(item, activeFocusBulan);
-
-                                const hakHonorAlokasi = Number(item.total_honor) || 0;
-                                const dicairkan = Number(item.jumlah_dicairkan) || 0;
-                                const jumlahBulanItem = rowSummary.jumlahBulan || 1;
-
-                                const hakHonorTampil = activeFocusBulan ? rowSummary.honorPerBulan : hakHonorAlokasi;
-                                const dicairkanTampil = activeFocusBulan ? dicairkan / jumlahBulanItem : dicairkan;
-                                const sisaHonorKegiatan = hakHonorTampil - dicairkanTampil;
-                                const usageRatio = rowSummary.worstUsageRatio;
-                                const warnPercent = rowSummary.worstWarnPercent;
-                                let rowStatusLabel = 'Tersedia';
-                                let rowStatusStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
-
-                                const bulanTerlampauiRow = rowSummary.perMonth.filter(
-                                  (pm) => !pm.isUnset && pm.usageRatio >= 100
-                                ).length;
-                                const bulanWarningRow = rowSummary.perMonth.filter(
-                                  (pm) => !pm.isUnset && pm.usageRatio < 100 && pm.usageRatio >= pm.warnPercent
-                                ).length;
-                                const bulanUnsetRow = rowSummary.perMonth.filter((pm) => pm.isUnset).length;
-                                const totalBulanRow = rowSummary.perMonth.length;
-
-                                if (activeFocusBulan) {
-                                  if (rowSummary.hasUnsetLimit) {
-                                    rowStatusLabel = 'Limit Belum Disetting';
-                                    rowStatusStyle = 'bg-purple-50 text-purple-700 border-purple-200';
-                                  } else if (usageRatio >= 100) {
-                                    rowStatusLabel = 'Limit Terlampaui';
-                                    rowStatusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
-                                  } else if (usageRatio >= warnPercent) {
-                                    rowStatusLabel = 'Mendekati Limit';
-                                    rowStatusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
-                                  }
-                                } else if (bulanUnsetRow > 0) {
-                                  rowStatusLabel =
-                                    totalBulanRow > 1 ? `Belum Disetting (${bulanUnsetRow}/${totalBulanRow} bln)` : 'Limit Belum Disetting';
-                                  rowStatusStyle = 'bg-purple-50 text-purple-700 border-purple-200';
-                                } else if (bulanTerlampauiRow > 0) {
-                                  rowStatusLabel =
-                                    totalBulanRow > 1 ? `${bulanTerlampauiRow}/${totalBulanRow} Bulan Terlampaui` : 'Limit Terlampaui';
-                                  rowStatusStyle = 'bg-rose-50 text-rose-700 border-rose-200';
-                                } else if (bulanWarningRow > 0) {
-                                  rowStatusLabel =
-                                    totalBulanRow > 1 ? `${bulanWarningRow}/${totalBulanRow} Bulan Mendekati` : 'Mendekati Limit';
-                                  rowStatusStyle = 'bg-amber-50 text-amber-700 border-amber-200';
-                                }
+                                const periodeInfo = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
+                                const totalRencana = Number(item.totalRencana) || 0;
+                                const rowBadge = getRowLimitBadge(item, activeFocusBulan);
 
                                 return (
-                                  <tr
-                                    key={item.id}
-                                    className={`hover:bg-slate-50/80 transition ${isChecked ? 'bg-blue-50/50' : ''}`}
-                                  >
+                                  <tr key={item.id} className={`hover:bg-slate-50/80 transition ${isChecked ? 'bg-blue-50/50' : ''}`}>
                                     <td className="py-2.5 px-3.5 text-center">
                                       <input
                                         type="checkbox"
@@ -1738,47 +1317,50 @@ export default function PenugasanPage() {
                                     <td className="py-2.5 px-3.5">
                                       <div className="font-medium text-slate-800">{item.kegiatan?.nama_kegiatan || '-'}</div>
                                       <div className="text-[10px] text-slate-400">
-                                        {rowSummary.label}
+                                        {periodeInfo.label}
                                         {item.kegiatan?.kode_kegiatan ? ` • ${item.kegiatan.kode_kegiatan}` : ''}
                                       </div>
                                     </td>
                                     <td className="py-2.5 px-3.5 text-right font-semibold text-blue-600">
-                                      {formatRupiah(hakHonorTampil)}
-                                      {rowSummary.jumlahBulan > 1 && (
-                                        <div className="text-[10px] font-normal text-slate-400">
-                                          {activeFocusBulan
-                                            ? `dari total ${formatRupiah(hakHonorAlokasi)} (${rowSummary.jumlahBulan} bln)`
-                                            : `≈ ${formatRupiah(rowSummary.honorPerBulan)}/bulan × ${rowSummary.jumlahBulan} bln`}
-                                        </div>
-                                      )}
-                                    </td>
-                                    <td className="py-2.5 px-3.5 text-right font-semibold text-emerald-600">
-                                      {formatRupiah(dicairkanTampil)}
-                                      {activeFocusBulan && rowSummary.jumlahBulan > 1 && (
-                                        <div className="text-[10px] font-normal text-slate-400">
-                                          dari total {formatRupiah(dicairkan)}
-                                        </div>
-                                      )}
-                                    </td>
-                                    <td className="py-2.5 px-3.5 text-right font-medium">
-                                      {sisaHonorKegiatan <= 0 && hakHonorTampil > 0 ? (
-                                        <span className="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-200">
-                                          Lunas
-                                        </span>
-                                      ) : (
-                                        <span className="text-amber-600 font-semibold">{formatRupiah(sisaHonorKegiatan)}</span>
+                                      {totalRencana > 0 ? formatRupiah(totalRencana) : (
+                                        <span className="text-slate-400 font-normal">Belum ada rencana</span>
                                       )}
                                     </td>
                                     <td className="py-2.5 px-3.5 text-center">
-                                      <span
-                                        className={`px-2 py-0.5 rounded text-[10px] font-medium border ${rowStatusStyle}`}
-                                        title={
-                                          rowSummary.focusBulan
-                                            ? `Status untuk bulan ${rowSummary.focusBulan}`
-                                            : 'Ringkasan status per bulan pada periode kegiatan ini'
-                                        }
-                                      >
-                                        {rowStatusLabel}
+                                      {rowBadge ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setDetailPenugasan(item);
+                                            setIsDetailModalOpen(true);
+                                          }}
+                                          title="Klik untuk lihat rincian per bulan"
+                                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-medium border hover:opacity-80 transition cursor-pointer ${rowBadge.style}`}
+                                        >
+                                          {rowBadge.icon} {rowBadge.label}
+                                        </button>
+                                      ) : (
+                                        <span className="text-[10px] text-slate-300">-</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-center">
+                                      {totalRencana > 0 ? (
+                                        <span className="inline-block px-2 py-0.5 rounded text-[10px] font-medium border bg-emerald-50 text-emerald-700 border-emerald-200">
+                                          🟢 Lengkap
+                                        </span>
+                                      ) : (
+                                        <Link
+                                          href={`/pencairan?penugasan_id=${item.id}`}
+                                          title="Wajib diisi — klik untuk buat Rencana Pencairan"
+                                          className="inline-block px-2 py-0.5 rounded text-[10px] font-medium border bg-amber-50 text-amber-700 border-amber-200 hover:opacity-80 transition"
+                                        >
+                                          🟡 Belum ada
+                                        </Link>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3.5 text-center">
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-medium border bg-slate-50 text-slate-600 border-slate-200">
+                                        {item.status_penugasan || 'Ditugaskan'}
                                       </span>
                                     </td>
                                     <td className="py-2.5 px-3.5 text-center">
@@ -1800,29 +1382,19 @@ export default function PenugasanPage() {
                                         >
                                           ✏️
                                         </button>
-                                        <button
-                                          onClick={() => handleOpenPencairanModal(item)}
+                                        <Link
+                                          href={`/pencairan?penugasan_id=${item.id}`}
                                           className="p-1.5 text-emerald-600 hover:bg-emerald-50 border border-emerald-200 rounded-md transition cursor-pointer"
-                                          title="Pencairan Honor"
+                                          title="Kelola Pencairan"
                                         >
                                           💰
-                                        </button>
+                                        </Link>
                                         <button
                                           onClick={() => handleDeletePenugasan(item.id!, item.mitra?.nama_mitra || '')}
                                           className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
                                           title="Hapus"
                                         >
-                                          <svg
-                                            xmlns="http://www.w3.org/2000/svg"
-                                            width="14"
-                                            height="14"
-                                            viewBox="0 0 24 24"
-                                            fill="none"
-                                            stroke="currentColor"
-                                            strokeWidth="2"
-                                            strokeLinecap="round"
-                                            strokeLinejoin="round"
-                                          >
+                                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <path d="M3 6h18" />
                                             <path d="M8 6V4h8v2" />
                                             <path d="M19 6l-1 14H6L5 6" />
@@ -1874,297 +1446,191 @@ export default function PenugasanPage() {
         </main>
       </div>
 
+      {/* ================= MODAL: TAMBAH/EDIT PENUGASAN ================= */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
             <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-              <h3 className="font-bold text-slate-800 text-sm">
-                {isEditMode ? 'Edit Penugasan Mitra' : 'Tambah Penugasan Mitra'}
-              </h3>
-              <button
-                onClick={() => setIsModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer"
-              >
-                ✕
-              </button>
+              <h3 className="font-bold text-slate-800 text-sm">{isEditMode ? 'Edit Penugasan Mitra' : 'Tambah Penugasan Mitra'}</h3>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer">✕</button>
             </div>
 
             <form onSubmit={handleSavePenugasan} className="p-5 space-y-4">
-              {(() => {
-                const totalHak = Number(formData.total_honor) || 0;
-                const totalCair = Number(formData.jumlah_dicairkan) || 0;
-                const sisaHonorKegiatan = totalHak - totalCair;
-                const isFullyPaid = isEditMode && totalHak > 0 && totalCair >= totalHak;
+              {isEditMode && (
+                <div className="p-3 rounded-lg text-xs font-medium border bg-slate-50 text-slate-600 border-slate-200">
+                  Rencana &amp; realisasi honor dikelola di menu{' '}
+                  <Link href={`/pencairan?penugasan_id=${formData.id}`} className="text-blue-600 font-semibold underline">
+                    Pencairan
+                  </Link>.
+                </div>
+              )}
 
-                return (
-                  <>
-                    {isEditMode && (
-                      <div
-                        className={`p-3 rounded-lg text-xs font-medium border flex items-center justify-between ${
-                          isFullyPaid
-                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : 'bg-amber-50 text-amber-800 border-amber-200'
-                        }`}
-                      >
-                        <div>
-                          <span className="font-semibold">
-                            {isFullyPaid ? '✅ STATUS: LUNAS' : '⏳ STATUS: BELUM DICAIRKAN PENUH'}
+              <div ref={mitraDropdownRef} className="relative">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Mitra</label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMitraDropdownOpen((prev) => !prev);
+                    setMitraSearchKeyword('');
+                  }}
+                  className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-white outline-none focus:border-blue-500 flex items-center justify-between gap-2 text-left"
+                >
+                  <span className="min-w-0 truncate flex items-center gap-1.5">
+                    {selectedMitraOption ? (
+                      <>
+                        <span className="text-slate-800 font-medium truncate">{selectedMitraOption.nama_mitra}</span>
+                        <span className="text-slate-400 font-mono shrink-0">({selectedMitraOption.sobat_id})</span>
+                        {selectedMitraOption.status_keaktifan === 'Nonaktif' && (
+                          <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
+                            NONAKTIF
                           </span>
-                          <p className="text-[11px] mt-0.5 text-slate-600">
-                            {isFullyPaid
-                              ? 'Honor telah dicairkan 100%. Field pencairan dikunci untuk keamanan data.'
-                              : `Sisa honor kegiatan yang belum dicairkan: ${formatRupiah(sisaHonorKegiatan)}`}
-                          </p>
-                        </div>
-                      </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-slate-400">-- Pilih Mitra --</span>
                     )}
+                  </span>
+                  <span className={`text-slate-400 shrink-0 transition-transform ${isMitraDropdownOpen ? 'rotate-180' : ''}`}>▾</span>
+                </button>
 
-                    {/* ============================================
-                        PILIH MITRA — combobox pencarian (bukan <select>
-                        native) supaya: (1) bisa dicari dengan mengetik
-                        nama/SOBAT ID kalau daftar mitranya panjang, dan
-                        (2) badge status (Nonaktif, Sudah Limit, dst.) bisa
-                        diberi warna yang jelas, karena <option> HTML biasa
-                        tidak bisa diwarnai per-item.
-                    ============================================ */}
-                    <div ref={mitraDropdownRef} className="relative">
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Mitra</label>
+                {isMitraDropdownOpen && (
+                  <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg overflow-hidden">
+                    <div className="p-2 border-b border-slate-100 bg-slate-50">
+                      <div className="relative">
+                        <span className="absolute inset-y-0 left-0 flex items-center pl-2 pointer-events-none text-slate-400 text-xs">🔍</span>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={mitraSearchKeyword}
+                          onChange={(e) => setMitraSearchKeyword(e.target.value)}
+                          placeholder="Cari nama mitra / SOBAT ID..."
+                          className="w-full pl-7 pr-2.5 py-1.5 text-xs border border-slate-200 rounded outline-none focus:border-blue-400 bg-white"
+                        />
+                      </div>
+                    </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMitraDropdownOpen((prev) => !prev);
-                          setMitraSearchKeyword('');
-                        }}
-                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-white outline-none focus:border-blue-500 flex items-center justify-between gap-2 text-left"
-                      >
-                        <span className="min-w-0 truncate flex items-center gap-1.5">
-                          {selectedMitraOption ? (
-                            <>
-                              <span className="text-slate-800 font-medium truncate">
-                                {selectedMitraOption.nama_mitra}
+                    <div className="max-h-56 overflow-y-auto">
+                      {filteredMitraOptionsForCombobox.length === 0 ? (
+                        <div className="px-3 py-4 text-center text-[11px] text-slate-400">Tidak ada mitra yang cocok dengan pencarian.</div>
+                      ) : (
+                        filteredMitraOptionsForCombobox.map((m) => {
+                          const sudahDitugaskan = !!checkDuplicateAssignment(m.sobat_id, formData.kegiatan_id, isEditMode ? formData.id : undefined);
+                          const isNonaktif = m.status_keaktifan === 'Nonaktif';
+                          const isSelected = formData.sobat_id === m.sobat_id;
+
+                          let badge: React.ReactNode = null;
+                          if (isNonaktif) {
+                            badge = (
+                              <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
+                                NONAKTIF
                               </span>
-                              <span className="text-slate-400 font-mono shrink-0">
-                                ({selectedMitraOption.sobat_id})
+                            );
+                          } else if (sudahDitugaskan) {
+                            badge = (
+                              <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                                Sudah Ditugaskan
                               </span>
-                              {selectedMitraOption.status_keaktifan === 'Nonaktif' && (
-                                <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
-                                  NONAKTIF
-                                </span>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-slate-400">-- Pilih Mitra --</span>
-                          )}
-                        </span>
-                        <span className={`text-slate-400 shrink-0 transition-transform ${isMitraDropdownOpen ? 'rotate-180' : ''}`}>
-                          ▾
-                        </span>
-                      </button>
+                            );
+                          }
 
-                      {isMitraDropdownOpen && (
-                        <div className="absolute z-30 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg overflow-hidden">
-                          <div className="p-2 border-b border-slate-100 bg-slate-50">
-                            <div className="relative">
-                              <span className="absolute inset-y-0 left-0 flex items-center pl-2 pointer-events-none text-slate-400 text-xs">
-                                🔍
+                          return (
+                            <button
+                              key={m.sobat_id}
+                              type="button"
+                              onClick={() => {
+                                handleSelectMitraInForm(m.sobat_id);
+                                setIsMitraDropdownOpen(false);
+                                setMitraSearchKeyword('');
+                              }}
+                              className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-blue-50/60 transition ${isSelected ? 'bg-blue-50' : ''}`}
+                            >
+                              <span className="min-w-0 truncate">
+                                <span className="font-medium text-slate-800">{m.nama_mitra}</span>
+                                <span className="text-slate-400 font-mono ml-1">({m.sobat_id})</span>
                               </span>
-                              <input
-                                type="text"
-                                autoFocus
-                                value={mitraSearchKeyword}
-                                onChange={(e) => setMitraSearchKeyword(e.target.value)}
-                                placeholder="Cari nama mitra / SOBAT ID..."
-                                className="w-full pl-7 pr-2.5 py-1.5 text-xs border border-slate-200 rounded outline-none focus:border-blue-400 bg-white"
-                              />
-                            </div>
-                          </div>
+                              {badge}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
 
-                          <div className="max-h-56 overflow-y-auto">
-                            {filteredMitraOptionsForCombobox.length === 0 ? (
-                              <div className="px-3 py-4 text-center text-[11px] text-slate-400">
-                                Tidak ada mitra yang cocok dengan pencarian.
-                              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Kegiatan BPS</label>
+                <select
+                  value={formData.kegiatan_id}
+                  onChange={(e) => handleSelectKegiatanInForm(Number(e.target.value))}
+                  className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none bg-white"
+                  required
+                >
+                  <option value={0} disabled>-- Pilih Kegiatan --</option>
+                  {kegiatanOptions.map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.nama_kegiatan} ({k.bulan_kegiatan})
+                    </option>
+                  ))}
+                </select>
+                {currentFormPeriodeInfo.jumlahBulan > 1 && (
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Kegiatan ini berlangsung {currentFormPeriodeInfo.jumlahBulan} bulan ({currentFormPeriodeInfo.label}).
+                  </p>
+                )}
+              </div>
+
+              {limitReferenceRows.length > 0 && (
+                <div className={`rounded-md border overflow-hidden ${isPenugasanBlockedByLimit ? 'border-rose-300' : 'border-slate-200'}`}>
+                  <div className="px-3 py-1.5 bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-600">
+                    Status limit honor mitra ini per bulan (periode kegiatan)
+                  </div>
+                  <table className="w-full text-[11px]">
+                    <tbody className="divide-y divide-slate-100">
+                      {limitReferenceRows.map((r) => (
+                        <tr key={r.bulanLabel}>
+                          <td className="px-3 py-1.5 text-slate-600">{r.bulanLabel}</td>
+                          <td className="px-3 py-1.5 text-right">
+                            {r.unset ? (
+                              <span className="text-purple-600 font-medium">Limit belum diatur</span>
+                            ) : r.sisa !== null && r.sisa <= 0 ? (
+                              <span className="text-rose-600 font-semibold">🔴 Penuh (sisa Rp 0)</span>
                             ) : (
-                              filteredMitraOptionsForCombobox.map((m) => {
-                                const blockedInfo = checkMitraLimitStatus(
-                                  m.sobat_id,
-                                  currentFormPeriodeInfo,
-                                  isEditMode ? formData.id : undefined
-                                );
-                                const sudahDitugaskan = !!checkDuplicateAssignment(
-                                  m.sobat_id,
-                                  formData.kegiatan_id,
-                                  isEditMode ? formData.id : undefined
-                                );
-                                const isNonaktif = m.status_keaktifan === 'Nonaktif';
-                                const isSelected = formData.sobat_id === m.sobat_id;
-
-                                let badge: React.ReactNode = null;
-                                if (isNonaktif) {
-                                  badge = (
-                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-700 border border-rose-300">
-                                      NONAKTIF
-                                    </span>
-                                  );
-                                } else if (blockedInfo?.sebab === 'belum_setting_limit') {
-                                  badge = (
-                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
-                                      Limit Belum Disetting
-                                    </span>
-                                  );
-                                } else if (blockedInfo?.sebab === 'sudah_limit') {
-                                  badge = (
-                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-rose-50 text-rose-700 border border-rose-200">
-                                      Sudah Limit
-                                    </span>
-                                  );
-                                } else if (sudahDitugaskan) {
-                                  badge = (
-                                    <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-                                      Sudah Ditugaskan
-                                    </span>
-                                  );
-                                }
-
-                                return (
-                                  <button
-                                    key={m.sobat_id}
-                                    type="button"
-                                    onClick={() => {
-                                      handleSelectMitraInForm(m.sobat_id);
-                                      setIsMitraDropdownOpen(false);
-                                      setMitraSearchKeyword('');
-                                    }}
-                                    className={`w-full text-left px-3 py-2 text-xs flex items-center justify-between gap-2 hover:bg-blue-50/60 transition ${
-                                      isSelected ? 'bg-blue-50' : ''
-                                    }`}
-                                  >
-                                    <span className="min-w-0 truncate">
-                                      <span className="font-medium text-slate-800">{m.nama_mitra}</span>
-                                      <span className="text-slate-400 font-mono ml-1">({m.sobat_id})</span>
-                                    </span>
-                                    {badge}
-                                  </button>
-                                );
-                              })
+                              <span className="text-emerald-600 font-medium">
+                                🟢 Sisa {formatRupiah(r.sisa || 0)} dari {formatRupiah(r.limit || 0)}
+                              </span>
                             )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {isPenugasanBlockedByLimit ? (
+                    <p className="px-3 py-2 text-[11px] text-rose-700 font-semibold bg-rose-50 border-t border-rose-200">
+                      🔴 Penugasan tidak dapat disimpan — limit honor mitra ini sudah penuh di seluruh bulan periode kegiatan ini.
+                    </p>
+                  ) : (
+                    <p className="px-3 py-1.5 text-[10px] text-slate-400 bg-slate-50 border-t border-slate-100">
+                      Bulan & nominal pasti baru ditentukan saat mengisi Rencana Pencairan (wajib diisi setelah Penugasan disimpan).
+                    </p>
+                  )}
+                </div>
+              )}
 
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">Pilih Kegiatan BPS</label>
-                      <select
-                        value={formData.kegiatan_id}
-                        onChange={(e) => handleSelectKegiatanInForm(Number(e.target.value))}
-                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none bg-white"
-                        required
-                      >
-                        <option value={0} disabled>
-                          -- Pilih Kegiatan --
-                        </option>
-                        {kegiatanOptions.map((k) => (
-                          <option key={k.id} value={k.id}>
-                            {k.nama_kegiatan} ({k.bulan_kegiatan})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">Hak Honor Alokasi (Rp)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={formData.total_honor || 0}
-                        onChange={(e) => setFormData({ ...formData, total_honor: Number(e.target.value) })}
-                        className={`w-full px-3 py-2 text-xs border rounded-md outline-none transition ${
-                          formLimitCheck.isExceeded
-                            ? 'border-rose-400 focus:border-rose-500 bg-rose-50'
-                            : 'border-slate-200 focus:border-blue-500'
-                        }`}
-                        required
-                      />
-                      {formData.sobat_id && currentFormPeriodeInfo.months.length > 0 && (
-                        <div className="mt-1.5 space-y-1">
-                          {currentFormPeriodeInfo.jumlahBulan > 1 && (
-                            <p className="text-[10px] text-slate-500">
-                              Kegiatan ini berlangsung <strong>{currentFormPeriodeInfo.jumlahBulan} bulan</strong> ({currentFormPeriodeInfo.label}) — honor dibagi rata{' '}
-                              <strong>{formatRupiah(formLimitCheck.honorPerBulan)}/bulan</strong>.
-                            </p>
-                          )}
-                          <div className="space-y-0.5">
-                            {formLimitCheck.perBulan.map((b) => (
-                              <div
-                                key={b.bulan}
-                                className={`flex justify-between items-center text-[10px] px-2 py-1 rounded ${
-                                  b.isUnset
-                                    ? 'bg-purple-50 text-purple-700 font-semibold'
-                                    : b.isExceeded
-                                    ? 'bg-rose-50 text-rose-600 font-semibold'
-                                    : b.isWarning
-                                    ? 'bg-amber-50 text-amber-600 font-medium'
-                                    : 'bg-slate-50 text-slate-400'
-                                }`}
-                              >
-                                <span>{b.bulan}</span>
-                                <span>
-                                  {b.isUnset
-                                    ? '⚠️ Limit belum diset untuk bulan ini'
-                                    : `${formatRupiah(b.newTotal)} / ${formatRupiah(b.maxLimit)}`}
-                                  {b.isExceeded && !b.isUnset ? ' ⛔' : ''}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                          {formLimitCheck.isUnset && (
-                            <p className="text-[10px] text-purple-700 font-semibold mt-1">
-                              ⚠️ Harap isi/setting limit honor untuk bulan kegiatan terkait terlebih dahulu sebelum dapat melanjutkan penugasan.
-                            </p>
-                          )}
-                          {formLimitCheck.isExceeded && !formLimitCheck.isUnset && (
-                            <p className="text-[10px] text-rose-600 font-semibold mt-1">
-                              ⛔ Alokasi honor pada bulan tertentu melebihi limit. Kurangi nominalnya untuk dapat menyimpan.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    {isEditMode && (
-                      <div>
-                        <div className="flex justify-between items-center mb-1">
-                          <label className="block text-xs font-semibold text-slate-700">Jumlah Dicairkan (Rp)</label>
-                          {isFullyPaid && (
-                            <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-100 px-1.5 py-0.5 rounded">
-                              Lunas
-                            </span>
-                          )}
-                        </div>
-                        <div className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md bg-slate-50 text-slate-700 font-semibold">
-                          {formatRupiah(totalCair)}
-                        </div>
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">Status Penugasan</label>
-                      <select
-                        value={formData.status_penugasan}
-                        onChange={(e) => setFormData({ ...formData, status_penugasan: e.target.value })}
-                        className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none bg-white"
-                      >
-                        <option value="Ditugaskan">Ditugaskan</option>
-                        <option value="Berjalan">Berjalan</option>
-                        <option value="Selesai">Selesai</option>
-                        <option value="Dibatalkan">Dibatalkan</option>
-                      </select>
-                    </div>
-                  </>
-                );
-              })()}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Status Penugasan</label>
+                <select
+                  value={formData.status_penugasan}
+                  onChange={(e) => setFormData({ ...formData, status_penugasan: e.target.value })}
+                  className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none bg-white"
+                >
+                  <option value="Ditugaskan">Ditugaskan</option>
+                  <option value="Berjalan">Berjalan</option>
+                  <option value="Selesai">Selesai</option>
+                  <option value="Dibatalkan">Dibatalkan</option>
+                </select>
+              </div>
 
               <div className="pt-3 flex justify-end gap-2 border-t border-slate-100">
                 <button
@@ -2174,13 +1640,13 @@ export default function PenugasanPage() {
                 >
                   Batal
                 </button>
-
                 <button
                   type="submit"
-                  disabled={isSubmitting || formLimitCheck.isExceeded}
+                  disabled={isSubmitting || isPenugasanBlockedByLimit}
+                  title={isPenugasanBlockedByLimit ? 'Limit honor mitra ini sudah penuh di seluruh bulan periode kegiatan' : undefined}
                   className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {isSubmitting ? 'Menyimpan...' : 'Simpan Penugasan'}
+                  {isSubmitting ? 'Menyimpan...' : isPenugasanBlockedByLimit ? 'Limit Penuh — Tidak Bisa Simpan' : 'Simpan Penugasan'}
                 </button>
               </div>
             </form>
@@ -2188,19 +1654,15 @@ export default function PenugasanPage() {
         </div>
       )}
 
+      {/* ================= MODAL: DETAIL (dengan rincian per bulan) ================= */}
       {isDetailModalOpen && detailPenugasan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden border border-slate-200">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
               <h3 className="font-bold text-slate-800 text-sm">Rincian Penugasan Mitra</h3>
-              <button
-                onClick={() => setIsDetailModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer"
-              >
-                ✕
-              </button>
+              <button onClick={() => setIsDetailModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer">✕</button>
             </div>
-            <div className="p-5 space-y-3 text-xs">
+            <div className="p-5 space-y-3 text-xs overflow-y-auto">
               <div className="flex justify-between border-b pb-2">
                 <span className="text-slate-500">Nama Mitra:</span>
                 <span className="font-semibold text-slate-800">{detailPenugasan.mitra?.nama_mitra || '-'}</span>
@@ -2217,63 +1679,44 @@ export default function PenugasanPage() {
                 <span className="text-slate-500">Periode:</span>
                 <span className="font-medium text-slate-800">{detailPenugasan.kegiatan?.bulan_kegiatan || '-'}</span>
               </div>
-              {(() => {
-                const periodeInfo = parseBulanKegiatan(detailPenugasan.kegiatan?.bulan_kegiatan);
-                if (periodeInfo.jumlahBulan <= 1) return null;
-                const honorPerBulan = (Number(detailPenugasan.total_honor) || 0) / periodeInfo.jumlahBulan;
-                return (
-                  <div className="flex justify-between border-b pb-2">
-                    <span className="text-slate-500">Rincian Honor/Bulan:</span>
-                    <span className="font-medium text-slate-800">
-                      {formatRupiah(honorPerBulan)} × {periodeInfo.jumlahBulan} bulan
-                    </span>
-                  </div>
-                );
-              })()}
               <div className="flex justify-between border-b pb-2">
-                <span className="text-slate-500">Hak Honor Alokasi:</span>
-                <span className="font-semibold text-blue-600">{formatRupiah(detailPenugasan.total_honor || 0)}</span>
-              </div>
-              <div className="flex justify-between border-b pb-2">
-                <span className="text-slate-500">Jumlah Dicairkan:</span>
-                <span className="font-semibold text-emerald-600">{formatRupiah(detailPenugasan.jumlah_dicairkan || 0)}</span>
-              </div>
-              <div className="flex justify-between border-b pb-2">
-                <span className="text-slate-500">Sisa Honor Kegiatan:</span>
-                <span className="font-semibold text-amber-600">
-                  {formatRupiah((detailPenugasan.total_honor || 0) - (detailPenugasan.jumlah_dicairkan || 0))}
-                </span>
+                <span className="text-slate-500">Total Rencana Pencairan:</span>
+                <span className="font-semibold text-blue-600">{formatRupiah(detailPenugasan.totalRencana || 0)}</span>
               </div>
               <div className="flex justify-between border-b pb-2">
                 <span className="text-slate-500">Status Penugasan:</span>
                 <span className="font-medium text-slate-800">{detailPenugasan.status_penugasan || 'Ditugaskan'}</span>
               </div>
+
+              {/* RINCIAN LIMIT PER BULAN — ini bagian yang dikembalikan supaya
+                  admin bisa lihat persis bulan mana yang penuh, bukan cuma
+                  label biner untuk seluruh periode. */}
               {(() => {
-                const rincianBulan = getRowLimitSummary(detailPenugasan);
-                if (rincianBulan.jumlahBulan <= 1) return null;
+                const statuses = getRowMonthStatuses(detailPenugasan); // semua bulan, tanpa filter
+                if (statuses.length <= 1) return null;
                 return (
                   <div className="pt-1">
                     <div className="text-slate-500 mb-1.5">Rincian Limit per Bulan:</div>
                     <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 overflow-hidden">
-                      {rincianBulan.perMonth.map((pm) => {
+                      {statuses.map((s) => {
                         let badgeStyle = 'bg-emerald-50 text-emerald-700 border-emerald-200';
                         let badgeLabel = 'Aman';
-                        if (pm.isUnset) {
+                        if (s.isUnset) {
                           badgeStyle = 'bg-purple-50 text-purple-700 border-purple-200';
                           badgeLabel = 'Belum Disetting';
-                        } else if (pm.usageRatio >= 100) {
+                        } else if (s.isFull) {
                           badgeStyle = 'bg-rose-50 text-rose-700 border-rose-200';
-                          badgeLabel = 'Terlampaui';
-                        } else if (pm.usageRatio >= pm.warnPercent) {
+                          badgeLabel = 'Penuh';
+                        } else if (s.isWarning) {
                           badgeStyle = 'bg-amber-50 text-amber-700 border-amber-200';
                           badgeLabel = 'Mendekati';
                         }
                         return (
-                          <div key={pm.bulan} className="flex items-center justify-between px-3 py-2 bg-white">
-                            <span className="font-medium text-slate-700">{pm.bulan}</span>
+                          <div key={s.bulan} className="flex items-center justify-between px-3 py-2 bg-white">
+                            <span className="font-medium text-slate-700">{s.bulan}</span>
                             <div className="flex items-center gap-2">
                               <span className="text-slate-500">
-                                {pm.isUnset ? 'Limit belum diset' : `Sisa ${formatRupiah(pm.sisa)}`}
+                                {s.isUnset ? 'Limit belum diset' : `Sisa ${formatRupiah(s.sisa || 0)} dari ${formatRupiah(s.limit || 0)}`}
                               </span>
                               <span className={`px-1.5 py-0.5 rounded border text-[10px] font-medium ${badgeStyle}`}>
                                 {badgeLabel}
@@ -2287,7 +1730,13 @@ export default function PenugasanPage() {
                 );
               })()}
             </div>
-            <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex justify-end">
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-100 flex justify-between gap-2 shrink-0">
+              <Link
+                href={`/pencairan?penugasan_id=${detailPenugasan.id}`}
+                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-md transition cursor-pointer"
+              >
+                💰 Kelola Pencairan
+              </Link>
               <button
                 onClick={() => setIsDetailModalOpen(false)}
                 className="px-4 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-medium rounded-md transition cursor-pointer"
@@ -2299,17 +1748,13 @@ export default function PenugasanPage() {
         </div>
       )}
 
+      {/* ================= MODAL: UBAH STATUS MASSAL ================= */}
       {isBulkStatusModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm overflow-hidden border border-slate-200">
             <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
               <h3 className="font-bold text-slate-800 text-sm">Ubah Status Massal</h3>
-              <button
-                onClick={() => setIsBulkStatusModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer"
-              >
-                ✕
-              </button>
+              <button onClick={() => setIsBulkStatusModalOpen(false)} className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer">✕</button>
             </div>
             <div className="p-5 space-y-3">
               <p className="text-xs text-slate-600">
@@ -2345,113 +1790,13 @@ export default function PenugasanPage() {
         </div>
       )}
 
-      {isLimitBlockedModalOpen && limitBlockedInfo && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
-            <div className="p-6 flex flex-col items-center text-center">
-              <div className="w-16 h-16 rounded-full bg-rose-500 flex items-center justify-center mb-4">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="28"
-                  height="28"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </div>
-
-              <h3 className="text-lg font-bold text-rose-600 mb-1.5">
-                {limitBlockedInfo.sebab === 'belum_setting_limit'
-                  ? 'Limit Honor Belum Diatur'
-                  : limitBlockedInfo.sebab === 'akan_melebihi'
-                  ? 'Alokasi Melebihi Limit'
-                  : 'Mitra Sudah Limit'}
-              </h3>
-
-              <p className="text-sm text-slate-500 mb-5 leading-relaxed">
-                {limitBlockedInfo.sebab === 'belum_setting_limit' ? (
-                  <>
-                    Limit honor untuk periode bulan <strong>{limitBlockedInfo.periode}</strong> belum diatur di database. 
-                    Anda wajib mengisi/mensetting limit bulan kegiatan tersebut terlebih dahulu sebelum dapat melanjutkan penugasan.
-                  </>
-                ) : limitBlockedInfo.sebab === 'akan_melebihi' ? (
-                  <>
-                    Honor yang sedang diisi akan mendorong total mitra ini di periode{' '}
-                    <strong>{limitBlockedInfo.periode}</strong> melebihi batas limit. Penugasan tidak dapat disimpan.
-                  </>
-                ) : (
-                  <>
-                    Mitra tidak dapat ditugaskan pada kegiatan baru di periode <strong>{limitBlockedInfo.periode}</strong>.
-                  </>
-                )}
-              </p>
-
-              {limitBlockedInfo.sebab !== 'belum_setting_limit' && (
-                <div className="w-full space-y-2.5 text-left text-sm mb-6">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Mitra</span>
-                    <span className="font-semibold text-slate-800">{limitBlockedInfo.namaMitra}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Limit Periode</span>
-                    <span className="font-semibold text-slate-800">{formatRupiah(limitBlockedInfo.limitBulanan)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">
-                      {limitBlockedInfo.sebab === 'akan_melebihi' ? 'Proyeksi Total Alokasi' : 'Hak Honor Alokasi'}
-                    </span>
-                    <span className="font-semibold text-slate-800">{formatRupiah(limitBlockedInfo.hakHonorAlokasi)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Sudah Dicairkan</span>
-                    <span className="font-semibold text-slate-800">{formatRupiah(limitBlockedInfo.sudahDicairkan)}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-500">Sisa Limit</span>
-                    <span className="font-semibold text-slate-800">
-                      {formatRupiah(limitBlockedInfo.sisaLimit)}{' '}
-                      <span className="text-rose-600">({limitBlockedInfo.persenTerpakai}%)</span>
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              <button
-                onClick={() => {
-                  setIsLimitBlockedModalOpen(false);
-                  setLimitBlockedInfo(null);
-                }}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm rounded-xl transition cursor-pointer"
-              >
-                Mengerti
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+      {/* ================= MODAL: MITRA SUDAH DITUGASKAN ================= */}
       {isDuplicateBlockedModalOpen && duplicateBlockedInfo && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
             <div className="p-6 flex flex-col items-center text-center">
               <div className="w-16 h-16 rounded-full bg-amber-500 flex items-center justify-center mb-4">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="28"
-                  height="28"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+                <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="18" y1="6" x2="6" y2="18" />
                   <line x1="6" y1="6" x2="18" y2="18" />
                 </svg>
@@ -2460,8 +1805,8 @@ export default function PenugasanPage() {
               <h3 className="text-lg font-bold text-amber-600 mb-1.5">Mitra Sudah Ditugaskan</h3>
 
               <p className="text-sm text-slate-500 mb-6 leading-relaxed">
-                <strong className="text-slate-700">{duplicateBlockedInfo.namaMitra}</strong> sudah memiliki penugasan
-                pada kegiatan <strong className="text-slate-700">{duplicateBlockedInfo.namaKegiatan}</strong>.
+                <strong className="text-slate-700">{duplicateBlockedInfo.namaMitra}</strong> sudah memiliki penugasan pada kegiatan{' '}
+                <strong className="text-slate-700">{duplicateBlockedInfo.namaKegiatan}</strong>.
                 <br />
                 Satu mitra tidak dapat ditugaskan dua kali pada kegiatan yang sama.
               </p>
@@ -2475,158 +1820,6 @@ export default function PenugasanPage() {
               >
                 Mengerti
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isPencairanModalOpen && pencairanPenugasan && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
-              <h3 className="font-bold text-slate-800 text-sm">Pencairan Honor</h3>
-              <button
-                onClick={() => {
-                  setIsPencairanModalOpen(false);
-                  setPencairanPenugasan(null);
-                }}
-                className="text-slate-400 hover:text-slate-600 text-lg cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="overflow-y-auto p-5 space-y-4">
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between border-b pb-2">
-                  <span className="text-slate-500">Mitra</span>
-                  <span className="font-semibold text-slate-800">{pencairanPenugasan.mitra?.nama_mitra || '-'}</span>
-                </div>
-                <div className="flex justify-between border-b pb-2">
-                  <span className="text-slate-500">Kegiatan</span>
-                  <span className="font-medium text-slate-800 text-right">
-                    {pencairanPenugasan.kegiatan?.nama_kegiatan || '-'}
-                  </span>
-                </div>
-                <div className="flex justify-between border-b pb-2">
-                  <span className="text-slate-500">Hak Honor</span>
-                  <span className="font-semibold text-blue-600">
-                    {formatRupiah(Number(pencairanPenugasan.total_honor) || 0)}
-                  </span>
-                </div>
-                <div className="flex justify-between border-b pb-2">
-                  <span className="text-slate-500">Sudah Dicairkan</span>
-                  <span className="font-semibold text-emerald-600">{formatRupiah(totalRiwayatDicairkan)}</span>
-                </div>
-                <div className="flex justify-between pb-1">
-                  <span className="text-slate-500">Sisa</span>
-                  <span className="font-bold text-amber-600">{formatRupiah(sisaHonorPencairan)}</span>
-                </div>
-              </div>
-
-              <div>
-                <h4 className="text-xs font-semibold text-slate-700 mb-2">Riwayat Pencairan</h4>
-                <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-40 overflow-y-auto">
-                  {isLoadingRiwayat ? (
-                    <div className="py-4 text-center text-[11px] text-slate-400">Memuat riwayat...</div>
-                  ) : riwayatPencairan.length === 0 ? (
-                    <div className="py-4 text-center text-[11px] text-slate-400">Belum ada pencairan.</div>
-                  ) : (
-                    riwayatPencairan.map((r, idx) => (
-                      <div key={r.id || idx} className="flex justify-between items-center px-3 py-2 text-xs">
-                        <div>
-                          <div className="font-semibold text-slate-700">Tahap {r.tahap_ke ?? idx + 1}</div>
-                          <div className="text-[10px] text-slate-400">{formatTanggal(r.tgl_pencairan)}</div>
-                          {r.catatan && <div className="text-[10px] text-slate-400 italic">{r.catatan}</div>}
-                        </div>
-                        <div className="font-semibold text-emerald-600">
-                          {formatRupiah(Number(r.nominal_dicairkan) || 0)}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              {sisaHonorPencairan > 0 ? (
-                <form onSubmit={handleSavePencairan} className="space-y-3 pt-2 border-t border-slate-100">
-                  <h4 className="text-xs font-semibold text-slate-700">Tambah Pencairan</h4>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Nominal (Rp)</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max={sisaHonorPencairan}
-                      value={pencairanForm.nominal || 0}
-                      onChange={(e) =>
-                        setPencairanForm((prev) => ({ ...prev, nominal: Number(e.target.value) }))
-                      }
-                      className={`w-full px-3 py-2 text-xs border rounded-md outline-none transition ${
-                        nominalPencairanInvalid && pencairanForm.nominal > 0
-                          ? 'border-rose-400 focus:border-rose-500 bg-rose-50'
-                          : 'border-slate-200 focus:border-blue-500'
-                      }`}
-                      required
-                    />
-                    {pencairanForm.nominal > sisaHonorPencairan ? (
-                      <p className="text-[10px] text-rose-600 font-semibold mt-1">
-                        ⛔ Nominal melebihi sisa honor ({formatRupiah(sisaHonorPencairan)}). Kurangi nominalnya.
-                      </p>
-                    ) : (
-                      <p className="text-[10px] text-slate-400 mt-1">
-                        Maksimal: {formatRupiah(sisaHonorPencairan)}
-                      </p>
-                    )}
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal</label>
-                    <input
-                      type="date"
-                      value={pencairanForm.tanggal}
-                      onChange={(e) => setPencairanForm((prev) => ({ ...prev, tanggal: e.target.value }))}
-                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none"
-                      required
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan (opsional)</label>
-                    <textarea
-                      value={pencairanForm.catatan}
-                      onChange={(e) => setPencairanForm((prev) => ({ ...prev, catatan: e.target.value }))}
-                      rows={2}
-                      className="w-full px-3 py-2 text-xs border border-slate-200 rounded-md focus:border-blue-500 outline-none resize-none"
-                      placeholder="Catatan tambahan mengenai pencairan ini..."
-                    />
-                  </div>
-
-                  <div className="pt-2 flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsPencairanModalOpen(false);
-                        setPencairanPenugasan(null);
-                      }}
-                      className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-medium rounded-md transition cursor-pointer"
-                    >
-                      Batal
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={isPencairanSubmitting || nominalPencairanInvalid}
-                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isPencairanSubmitting ? 'Menyimpan...' : 'Simpan'}
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <div className="p-3 rounded-lg text-xs font-medium border bg-emerald-50 text-emerald-800 border-emerald-200 text-center">
-                  ✅ Honor sudah dicairkan penuh (Lunas).
-                </div>
-              )}
             </div>
           </div>
         </div>
