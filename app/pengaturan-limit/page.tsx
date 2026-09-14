@@ -4,6 +4,8 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import Header from '@/components/layout/Header';
 import Sidebar from '@/components/layout/Sidebar';
+import { logActivity } from '@/lib/logActivity';
+
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
@@ -246,9 +248,13 @@ export default function PengaturanLimitPage() {
     }
 
     setLoadingRows(true);
+
     try {
       const batasMaksimal = Number(limitInfo?.batas_maksimal || 0);
       const persenPeringatan = Number(limitInfo?.persen_peringatan || 80);
+      const normalizePeriode = (value: unknown) =>
+        String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+      const periodeAktif = normalizePeriode(selectedBulanPeriode);
 
       const { data: penugasanData, error: errPenugasan } = await supabase
         .from('penugasan')
@@ -270,37 +276,67 @@ export default function PengaturanLimitPage() {
 
       if (errPenugasan) throw errPenugasan;
 
-      const alokasiMap: Record<
-        string,
-        {
-          nama_mitra: string;
-          total: number;
-          dicairkan: number;
-          rincian: MitraLimitRow['rincianKegiatan'];
-        }
-      > = {};
+      const penugasanIds = (penugasanData || []).map((item: any) => item.id).filter(Boolean);
+      const { data: pencairanData, error: errPencairan } = penugasanIds.length
+        ? await supabase
+            .from('pencairan_honor')
+            .select('id, penugasan_id, sobat_id, bulan_pencairan, nominal_rencana, nominal_dicairkan, tgl_pencairan')
+            .in('penugasan_id', penugasanIds)
+        : { data: [], error: null };
+
+      if (errPencairan) throw errPencairan;
+
+      const pencairanMap: Record<string, { rencana: number; realisasi: number }> = {};
+      (pencairanData || []).forEach((row: any) => {
+        if (normalizePeriode(row.bulan_pencairan) !== periodeAktif) return;
+        const key = String(row.penugasan_id);
+        if (!pencairanMap[key]) pencairanMap[key] = { rencana: 0, realisasi: 0 };
+        pencairanMap[key].rencana += Number(row.nominal_rencana) || 0;
+        pencairanMap[key].realisasi += Number(row.nominal_dicairkan) || 0;
+      });
+
+      const alokasiMap: Record<string, {
+        nama_mitra: string;
+        total: number;
+        dicairkan: number;
+        rincian: MitraLimitRow['rincianKegiatan'];
+      }> = {};
 
       (penugasanData || []).forEach((item: any) => {
         const dataMitra = Array.isArray(item.mitra) ? item.mitra[0] : item.mitra;
         const dataKegiatan = Array.isArray(item.kegiatan) ? item.kegiatan[0] : item.kegiatan;
-
         const sobatId = dataMitra?.sobat_id || item.sobat_id;
         const namaMitra = dataMitra?.nama_mitra || 'Tanpa Nama';
-
         if (!sobatId) return;
 
         const periodeInfo = parseBulanKegiatan(dataKegiatan?.bulan_kegiatan);
-        if (!periodeInfo.months.includes(selectedBulanPeriode)) return;
+        const masukBulanIni = periodeInfo.months.some(
+          (bulan) => normalizePeriode(bulan) === periodeAktif
+        );
+        const pencairanBulanIni = pencairanMap[String(item.id)];
+
+        if (!masukBulanIni && !pencairanBulanIni) return;
 
         const jumlahBulan = periodeInfo.jumlahBulan || 1;
         const totalHonorKegiatan = Number(item.total_honor) || 0;
         const totalDicairkanKegiatan = Number(item.jumlah_dicairkan) || 0;
 
-        const honorBulanIni = totalHonorKegiatan / jumlahBulan;
-        const dicairkanBulanIni = totalDicairkanKegiatan / jumlahBulan;
+        const honorBulanIni = pencairanBulanIni
+          ? pencairanBulanIni.rencana
+          : totalHonorKegiatan / jumlahBulan;
+        const dicairkanBulanIni = pencairanBulanIni
+          ? pencairanBulanIni.realisasi
+          : totalDicairkanKegiatan / jumlahBulan;
+
+        if (honorBulanIni === 0 && dicairkanBulanIni === 0) return;
 
         if (!alokasiMap[sobatId]) {
-          alokasiMap[sobatId] = { nama_mitra: namaMitra, total: 0, dicairkan: 0, rincian: [] };
+          alokasiMap[sobatId] = {
+            nama_mitra: namaMitra,
+            total: 0,
+            dicairkan: 0,
+            rincian: [],
+          };
         }
 
         alokasiMap[sobatId].total += honorBulanIni;
@@ -315,26 +351,20 @@ export default function PengaturanLimitPage() {
 
       const rows: MitraLimitRow[] = Object.entries(alokasiMap).map(([sobatId, data]) => {
         const persenTerpakai = batasMaksimal > 0 ? (data.total / batasMaksimal) * 100 : 0;
-
         let status: MitraLimitRow['status'] = 'aman';
-        if (batasMaksimal > 0) {
-          if (data.total > batasMaksimal) {
-            status = 'melebihi';
-          } else if (data.total === batasMaksimal) {
-            status = 'mencapai';
-          } else if (persenTerpakai >= persenPeringatan) {
-            status = 'peringatan';
-          }
-        }
 
-        const sisa = batasMaksimal - data.total;
+        if (batasMaksimal > 0) {
+          if (data.total > batasMaksimal) status = 'melebihi';
+          else if (data.total >= batasMaksimal) status = 'mencapai';
+          else if (persenTerpakai >= persenPeringatan) status = 'peringatan';
+        }
 
         return {
           sobat_id: sobatId,
           nama_mitra: data.nama_mitra,
           alokasi: data.total,
           dicairkan: data.dicairkan,
-          sisa,
+          sisa: batasMaksimal - data.total,
           persen_terpakai: persenTerpakai,
           status,
           rincianKegiatan: data.rincian,
@@ -406,7 +436,7 @@ export default function PengaturanLimitPage() {
     setIsModalOpen(true);
   };
 
-  const handleSaveLimit = async (e: React.FormEvent) => {
+    const handleSaveLimit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedBulanPeriode) return;
 
@@ -429,17 +459,37 @@ export default function PengaturanLimitPage() {
           .eq('id', limitInfo.id);
 
         if (error) throw error;
+
+        await logActivity({
+          aksi: 'ubah',
+          entitas: 'limit_honor',
+          deskripsi: `Mengubah limit honor bulan ${selectedBulanPeriode} menjadi ${formatRupiah(numericBatas)} (peringatan ${formData.persen_peringatan}%)`,
+          referensiId: limitInfo.id,
+        });
+
         alert(`Limit honor bulan ${selectedBulanPeriode} berhasil diperbarui.`);
       } else {
-        const { error } = await supabase.from('limit_honor').insert([
-          {
-            bulan_periode: selectedBulanPeriode,
-            batas_maksimal: numericBatas,
-            persen_peringatan: Number(formData.persen_peringatan),
-          },
-        ]);
+        const { data: inserted, error } = await supabase
+          .from('limit_honor')
+          .insert([
+            {
+              bulan_periode: selectedBulanPeriode,
+              batas_maksimal: numericBatas,
+              persen_peringatan: Number(formData.persen_peringatan),
+            },
+          ])
+          .select('id')
+          .single();
 
         if (error) throw error;
+
+        await logActivity({
+          aksi: 'tambah',
+          entitas: 'limit_honor',
+          deskripsi: `Menetapkan limit honor bulan ${selectedBulanPeriode} sebesar ${formatRupiah(numericBatas)} (peringatan ${formData.persen_peringatan}%)`,
+          referensiId: inserted?.id ?? null,
+        });
+
         alert(`Limit honor bulan ${selectedBulanPeriode} berhasil ditetapkan.`);
       }
 
@@ -600,6 +650,7 @@ export default function PengaturanLimitPage() {
                   <option value="Semua Status">Semua Status</option>
                   <option value="Aman">Aman</option>
                   <option value="Mendekati Limit">Mendekati Limit</option>
+                  <option value="Mencapai Limit">Mencapai Limit</option>
                   <option value="Melebihi Limit">Melebihi Limit</option>
                 </select>
               </div>

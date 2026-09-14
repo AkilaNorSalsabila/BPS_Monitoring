@@ -1,3 +1,4 @@
+
 'use client';
 
 import Link from 'next/link';
@@ -87,6 +88,7 @@ function Icon({ name }: { name: IconName }) {
           <path d="M14 2v6h6M8 13h8M8 17h6" />
         </svg>
       );
+
     case 'table':
       return (
         <svg {...common}>
@@ -198,7 +200,7 @@ const reportItems = [
 ];
 
 /**
- * Menu Sistem (log aktivitas, dsb).
+ * Menu Sistem.
  */
 const systemItems = [
   {
@@ -209,7 +211,7 @@ const systemItems = [
 ];
 
 /**
- * Menu Pengaturan (bawah sidebar) -> halaman /settings
+ * Menu Pengaturan.
  */
 const settingsItems = [
   {
@@ -219,7 +221,7 @@ const settingsItems = [
   },
   {
     label: 'Manajemen Akun',
-    href: 'pengaturan-akun',
+    href: '/pengaturan-akun',
     icon: 'users' as IconName,
   },
 ];
@@ -230,7 +232,11 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   /**
    * Komponen untuk menampilkan satu item menu.
    */
-  const renderMenuItem = (item: { label: string; href: string; icon: IconName }) => {
+  const renderMenuItem = (item: {
+    label: string;
+    href: string;
+    icon: IconName;
+  }) => {
     const active = pathname === item.href;
 
     return (
@@ -239,7 +245,9 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         href={item.href}
         onClick={item.href !== '#' ? onClose : undefined}
         className={`flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors ${
-          active ? 'bg-[#2d84d8] font-semibold shadow-sm' : 'text-white/95 hover:bg-white/10'
+          active
+            ? 'bg-[#2d84d8] font-semibold shadow-sm'
+            : 'text-white/95 hover:bg-white/10'
         }`}
       >
         <Icon name={item.icon} />
@@ -266,10 +274,13 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        {/* LOGO BPS — tinggi disamakan dengan Header (62px) supaya garis
-            pembatas di bawah logo & garis pembatas Header sejajar lurus. */}
+        {/* LOGO BPS */}
         <div className="flex h-[62px] items-center justify-center border-b border-white/15 px-4">
-          <Link href="/dashboard" onClick={onClose} className="flex items-center justify-center">
+          <Link
+            href="/dashboard"
+            onClick={onClose}
+            className="flex items-center justify-center"
+          >
             <img
               src="/Rectangle 10.png"
               alt="BPS Kota Mojokerto"
@@ -281,40 +292,67 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         {/* NAVIGASI SIDEBAR */}
         <nav className="flex-1 overflow-y-auto px-2.5 py-3 text-[14px]">
           {/* DASHBOARD */}
-          <div className="mb-3">{renderMenuItem(dashboardItem)}</div>
+          <div className="mb-3">
+            {renderMenuItem(dashboardItem)}
+          </div>
 
           {/* DATA MASTER */}
           <div className="mb-3">
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Data Master</div>
-            <div className="space-y-0.5">{dataMasterItems.map((item) => renderMenuItem(item))}</div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Data Master
+            </div>
+
+            <div className="space-y-0.5">
+              {dataMasterItems.map((item) => renderMenuItem(item))}
+            </div>
           </div>
 
           {/* PENUGASAN */}
           <div className="mb-3">
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Penugasan</div>
-            <div className="space-y-0.5">{assignmentItems.map((item) => renderMenuItem(item))}</div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Penugasan
+            </div>
+
+            <div className="space-y-0.5">
+              {assignmentItems.map((item) => renderMenuItem(item))}
+            </div>
           </div>
 
           {/* LAPORAN */}
           <div className="mb-3">
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Laporan</div>
-            <div className="space-y-0.5">{reportItems.map((item) => renderMenuItem(item))}</div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Laporan
+            </div>
+
+            <div className="space-y-0.5">
+              {reportItems.map((item) => renderMenuItem(item))}
+            </div>
           </div>
 
           {/* SISTEM */}
-          <div>
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Sistem</div>
-            <div className="space-y-0.5">{systemItems.map((item) => renderMenuItem(item))}</div>
-          </div>
-        </nav>
+          <div className="mb-3">
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Sistem
+            </div>
 
-          {/* PENGATURAN (sekarang menyatu di alur menu utama, setelah Laporan) */}
+            <div className="space-y-0.5">
+              {systemItems.map((item) => renderMenuItem(item))}
+            </div>
+          </div>
+
+          {/* PENGATURAN */}
           <div>
-            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">Pengaturan</div>
-            <div className="space-y-0.5">{settingsItems.map((item) => renderMenuItem(item))}</div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Pengaturan
+            </div>
+
+            <div className="space-y-0.5">
+              {settingsItems.map((item) => renderMenuItem(item))}
+            </div>
           </div>
         </nav>
       </aside>
     </>
   );
 }
+
