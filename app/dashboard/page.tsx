@@ -22,57 +22,70 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 // =========================================================
 // CONSTANT
-// (disamakan dengan halaman Penugasan - limit_honor keyed by bulan_periode,
-//  pencairan dibaca dari penugasan.jumlah_dicairkan)
 // =========================================================
 
 const DEFAULT_LIMIT = 3000000;
-
-const DEFAULT_PERIODE = 'Agustus 2026';
-
-const BULAN_URUTAN: Record<string, number> = {
-  januari: 1,
-  februari: 2,
-  maret: 3,
-  april: 4,
-  mei: 5,
-  juni: 6,
-  juli: 7,
-  agustus: 8,
-  september: 9,
-  oktober: 10,
-  november: 11,
-  desember: 12,
-};
-
-/** Parse "Agustus 2026" -> sortable number 202608. Return 0 kalau gagal parse. */
-function periodeToSortKey(periode: string): number {
-  const parts = periode.trim().toLowerCase().split(/\s+/);
-  if (parts.length < 2) return 0;
-  const bulan = BULAN_URUTAN[parts[0]] || 0;
-  const tahun = parseInt(parts[1], 10) || 0;
-  return tahun * 100 + bulan;
-}
-
-// =========================================================
-// PARSER PERIODE KEGIATAN MULTI-BULAN
-// =========================================================
-// kegiatan.bulan_kegiatan bisa berisi rentang dengan kata sambung apa saja
-// (mis. "Agustus 2026 - Oktober 2026", "Agustus 2026 s.d. Oktober 2026 (3
-// Bulan)", dst). Sebelumnya dashboard memakai teks itu APA ADANYA sebagai
-// "periode" untuk mengelompokkan mitra — akibatnya kegiatan 1 bulan dan
-// kegiatan 3 bulan yang sama-sama mencakup Agustus dianggap DUA PERIODE
-// TERPISAH yang tidak pernah digabung, sehingga limit gabungannya tidak
-// pernah terdeteksi tercapai.
-//
-// Parser ini mengurai teks itu jadi daftar BULAN KALENDER individual
-// ("Agustus 2026", "September 2026", dst) dengan mencari semua pasangan
-// "NamaBulan Tahun" di dalam teks, apa pun kata penghubungnya.
+const DEFAULT_WARN_PERCENT = 80;
 
 const NAMA_BULAN_ID = [
   'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
   'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
 ];
+
+// =========================================================
+// HELPER BULAN
+// ⭐ Disamakan persis dengan halaman Laporan Mitra Limit: satu-satunya
+// penentu "periode/bulan mana yang terbebani" untuk sebuah baris
+// pencairan_honor adalah kolom `bulan_pencairan` — baik untuk rencana
+// MAUPUN realisasi. `tgl_pencairan` HANYA tanggal transaksi aktual
+// (kapan dibayarkan), bukan penentu periode; seorang mitra bisa saja
+// dibayar lebih awal/lebih lambat dari bulan yang seharusnya dibebani.
+// =========================================================
+
+const parseBulanLabel = (label: string): { idx: number; year: number } | null => {
+  if (!label) return null;
+  const parts = label.trim().split(/\s+/);
+  if (parts.length < 2) return null;
+
+  const idx = NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === parts[0].toLowerCase());
+  const year = parseInt(parts[1], 10);
+
+  if (idx === -1 || isNaN(year)) return null;
+  return { idx, year };
+};
+
+const monthLabelToKey = (label: string): number | null => {
+  const parsed = parseBulanLabel(label);
+  if (!parsed) return null;
+  return parsed.year * 12 + parsed.idx;
+};
+
+const bulanEquals = (a: string, b: string): boolean => {
+  const ka = monthLabelToKey(a);
+  const kb = monthLabelToKey(b);
+
+  if (ka === null || kb === null) {
+    return (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
+  }
+
+  return ka === kb;
+};
+
+/** Dipakai untuk sorting kronologis; label yang gagal diparse dianggap 0 (paling awal). */
+const periodeToSortKey = (label: string): number => monthLabelToKey(label) ?? 0;
+
+/** Label bulan berjalan sesuai tanggal sistem, mis. "September 2026". */
+const getCurrentMonthLabel = (): string => {
+  const now = new Date();
+  return `${NAMA_BULAN_ID[now.getMonth()]} ${now.getFullYear()}`;
+};
+
+// =========================================================
+// PARSER PERIODE KEGIATAN MULTI-BULAN
+// (khusus dipakai untuk section "Pemerataan Penugasan Mitra" di bawah,
+// yang memang mengelompokkan berdasarkan bulan_kegiatan pada tabel
+// kegiatan, bukan pencairan_honor)
+// =========================================================
 
 const monthIndexFromName = (name: string): number =>
   NAMA_BULAN_ID.findIndex((m) => m.toLowerCase() === name.trim().toLowerCase());
@@ -125,24 +138,6 @@ function parseBulanKegiatan(raw: string | null | undefined): PeriodeKegiatan {
   return { months: [text], jumlahBulan: 1 };
 }
 
-// Mencocokkan sebuah label bulan kalender (mis. "Agustus 2026") dengan
-// format "YYYY-MM" dari limit_honor.bulan_periode (mis. "2026-08").
-const BULAN_MAP: Record<string, string> = {
-  '01': 'januari', '02': 'februari', '03': 'maret', '04': 'april',
-  '05': 'mei', '06': 'juni', '07': 'juli', '08': 'agustus',
-  '09': 'september', '10': 'oktober', '11': 'november', '12': 'desember',
-};
-function isMatchingMonth(
-  calendarLabel: string | null | undefined,
-  limitPeriode: string | null | undefined
-): boolean {
-  if (!calendarLabel || !limitPeriode) return false;
-
-  const kalender = String(calendarLabel).trim().toLowerCase();
-  const periodeLimit = String(limitPeriode).trim().toLowerCase();
-
-  return kalender === periodeLimit;
-}
 // =========================================================
 // INTERFACE
 // =========================================================
@@ -152,19 +147,41 @@ interface MitraRow {
   nama_mitra: string;
 }
 
-interface PenugasanRow {
+// Baris rencana/realisasi pencairan — SUMBER UTAMA untuk grafik pencairan,
+// tabel "Mendekati/Sudah Limit", DAN untuk menghitung Total Honor per
+// penugasan (lihat catatan di bawah).
+interface PencairanHonorRow {
   sobat_id: string;
-  total_honor: number | null;
-  jumlah_dicairkan: number | null;
-  kegiatan?: {
-    bulan_kegiatan: string;
-  };
+  // ⭐ FIX: dibutuhkan supaya nominal pencairan bisa dikaitkan ke satu
+  // baris Penugasan tertentu (satu mitra bisa punya lebih dari satu
+  // penugasan di bulan yang sama).
+  penugasan_id: number | null;
+  bulan_pencairan: string;
+  nominal_rencana: number | null;
+  nominal_dicairkan: number | null;
+  tgl_pencairan: string | null; // ⚠️ HANYA tanggal transaksi aktual, BUKAN penentu periode.
 }
 
 interface LimitHonorRow {
+  bulan: number | null;
+  tahun: number | null;
   bulan_periode: string;
   batas_maksimal: number;
   persen_peringatan: number;
+}
+
+// Dipakai khusus untuk section Pemerataan Penugasan Mitra.
+// ⭐ FIX: `total_honor` di tabel `penugasan` TIDAK dipakai lagi — sesuai
+// keputusan desain, honor tidak diinput manual di Penugasan, melainkan
+// dihitung otomatis dari akumulasi Rencana Pencairan (pencairan_honor).
+// `id` ditambahkan supaya baris penugasan bisa dicocokkan dengan baris
+// pencairan_honor via `penugasan_id`.
+interface PenugasanRow {
+  id: number;
+  sobat_id: string;
+  kegiatan?: {
+    bulan_kegiatan: string;
+  };
 }
 
 // =========================================================
@@ -174,21 +191,22 @@ interface LimitHonorRow {
 export default function DashboardPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
-  const [periodeBulan, setPeriodeBulan] = useState<string>(DEFAULT_PERIODE);
+  // ⭐ Default periode SELALU bulan berjalan sesuai tanggal sistem.
+  const [periodeBulan, setPeriodeBulan] = useState<string>(getCurrentMonthLabel());
   const [periodeOptions, setPeriodeOptions] = useState<string[]>([]);
 
   const [mitraList, setMitraList] = useState<MitraRow[]>([]);
-  const [penugasanList, setPenugasanList] = useState<PenugasanRow[]>([]);
-  // Disimpan sebagai array (bukan Record dengan exact-key) supaya bisa
-  // dicocokkan secara fleksibel via isMatchingMonth — sama seperti halaman
-  // Penugasan/Laporan yang sudah dibetulkan. Key persis ke bulan_periode
-  // ("2026-08") HAMPIR TIDAK PERNAH sama dengan label kalender ("Agustus
-  // 2026"), jadi kalau tetap Record, limit akan selalu jatuh ke DEFAULT_LIMIT.
+  const [pencairanList, setPencairanList] = useState<PencairanHonorRow[]>([]);
   const [limitList, setLimitList] = useState<LimitHonorRow[]>([]);
+
+  // Khusus untuk section Pemerataan Penugasan Mitra (tidak dipakai untuk
+  // statistik limit/grafik lagi).
+  const [penugasanList, setPenugasanList] = useState<PenugasanRow[]>([]);
+
   const [loading, setLoading] = useState<boolean>(true);
 
   /* ============================================
-     FETCH DATA (mitra, penugasan+kegiatan, limit_honor)
+     FETCH DATA
   ============================================ */
   const fetchDashboardData = useCallback(async () => {
     setLoading(true);
@@ -199,10 +217,28 @@ export default function DashboardPage() {
       if (mitraErr) throw mitraErr;
       setMitraList(mitraData || []);
 
+      // ⭐ SUMBER UTAMA statistik limit, grafik pencairan, DAN Total Honor
+      // per penugasan (lewat kolom penugasan_id).
+      const { data: pencairanData, error: pencairanErr } = await supabase
+        .from('pencairan_honor')
+        .select('sobat_id, penugasan_id, bulan_pencairan, nominal_rencana, nominal_dicairkan, tgl_pencairan');
+      if (pencairanErr) throw pencairanErr;
+      setPencairanList((pencairanData as any) || []);
+
+      const { data: limitData, error: limitErr } = await supabase
+        .from('limit_honor')
+        .select('bulan, tahun, bulan_periode, batas_maksimal, persen_peringatan');
+      if (limitErr) {
+        console.error('Error fetch limit_honor:', limitErr);
+      }
+      setLimitList(limitData || []);
+
+      // Masih dibutuhkan untuk section Pemerataan Penugasan Mitra.
+      // ⭐ FIX: select `id` (bukan `total_honor`) supaya bisa dicocokkan
+      // dengan pencairan_honor.penugasan_id.
       const { data: penugasanData, error: penugasanErr } = await supabase.from('penugasan').select(`
+          id,
           sobat_id,
-          total_honor,
-          jumlah_dicairkan,
           kegiatan:kegiatan_id (
             bulan_kegiatan
           )
@@ -210,38 +246,20 @@ export default function DashboardPage() {
       if (penugasanErr) throw penugasanErr;
       setPenugasanList((penugasanData as any) || []);
 
-      const { data: limitData, error: limitErr } = await supabase
-        .from('limit_honor')
-        .select('bulan_periode, batas_maksimal, persen_peringatan');
-
-      if (limitErr) {
-        console.error('Error fetch limit_honor:', limitErr);
-      }
-
-      setLimitList(limitData || []);
-
-      // Periode dashboard diambil dari DATA AKTUAL, bukan hard-code, dan
-      // sekarang berupa BULAN KALENDER ("Agustus 2026") hasil pengurain
-      // kegiatan.bulan_kegiatan (bisa multi-bulan) + limit_honor.bulan_periode
-      // (format "YYYY-MM" dikonversi ke label kalender yang sama). Dengan
-      // begitu satu kegiatan yang membentang 3 bulan akan muncul sebagai 3
-      // opsi bulan terpisah, bukan 1 opsi rentang yang aneh.
+      // ⭐ Opsi periode dibangun dari `bulan_pencairan` (SATU-SATUNYA sumber
+      // periode, baik rencana maupun realisasi) + bulan_periode di
+      // limit_honor, dan SELALU menyertakan bulan berjalan.
       const periodeSet = new Set<string>();
 
-      (penugasanData || []).forEach((item: any) => {
-        const raw = item?.kegiatan?.bulan_kegiatan;
-        if (!raw) return;
-        parseBulanKegiatan(String(raw)).months.forEach((bulan) => periodeSet.add(bulan));
+      (pencairanData || []).forEach((row: any) => {
+        if (row.bulan_pencairan) periodeSet.add(row.bulan_pencairan);
       });
 
       (limitData || []).forEach((row: LimitHonorRow) => {
-        const raw = String(row.bulan_periode || '').trim();
-        const [tahun, bulanNum] = raw.split('-');
-        const idx = parseInt(bulanNum, 10) - 1;
-        if (tahun && idx >= 0 && idx < 12) {
-          periodeSet.add(`${NAMA_BULAN_ID[idx]} ${tahun}`);
-        }
+        if (row.bulan_periode) periodeSet.add(row.bulan_periode);
       });
+
+      periodeSet.add(getCurrentMonthLabel());
 
       const dynamicPeriodeOptions = Array.from(periodeSet).sort(
         (a, b) => periodeToSortKey(a) - periodeToSortKey(b)
@@ -249,19 +267,11 @@ export default function DashboardPage() {
 
       setPeriodeOptions(dynamicPeriodeOptions);
 
-      // Pertahankan Agustus 2026 jika ada. Jika tidak ada, gunakan
-      // periode terbaru yang tersedia.
-      setPeriodeBulan((current) => {
-        if (dynamicPeriodeOptions.includes(current)) {
-          return current;
-        }
-
-        if (dynamicPeriodeOptions.includes(DEFAULT_PERIODE)) {
-          return DEFAULT_PERIODE;
-        }
-
-        return dynamicPeriodeOptions[dynamicPeriodeOptions.length - 1] || current;
-      });
+      // Pertahankan pilihan periode yang sedang aktif kalau masih valid;
+      // kalau tidak (mis. pertama kali load), pakai bulan berjalan.
+      setPeriodeBulan((current) =>
+        dynamicPeriodeOptions.includes(current) ? current : getCurrentMonthLabel()
+      );
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
     } finally {
@@ -274,80 +284,95 @@ export default function DashboardPage() {
   }, [fetchDashboardData]);
 
   /* ============================================
-     AKUMULASI HONOR & PENCAIRAN PER MITRA PER BULAN KALENDER
-     Honor kegiatan dibagi rata ke setiap bulan yang dicakupnya (kegiatan 3
-     bulan dengan honor 900.000 -> 300.000/bulan), lalu dijumlah per mitra
-     per bulan kalender — supaya kegiatan 1-bulan dan kegiatan multi-bulan
-     yang sama-sama menyentuh bulan yang sama IKUT TERGABUNG, bukan dianggap
-     "periode" yang terpisah.
+     BULAN YANG MEMBEBANI LIMIT untuk 1 baris pencairan_honor.
+     ⭐ FIX: SELALU pakai `bulan_pencairan`, baik untuk rencana maupun
+     realisasi — konsisten dengan Laporan Mitra Limit. `tgl_pencairan`
+     TIDAK dipakai untuk menentukan periode (itu cuma tanggal transaksi
+     aktual; mitra bisa dibayar lebih awal/lambat dari bulan yang
+     seharusnya dibebani).
   ============================================ */
-  const accumulatedBySobatPeriode = useMemo(() => {
-    const map: Record<string, { totalHonor: number; totalDicairkan: number }> = {};
-    penugasanList.forEach((item) => {
-      if (!item.sobat_id) return;
-      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (months.length === 0) return;
+  const getRowUsageMonth = useCallback((row: PencairanHonorRow): string => {
+    return row.bulan_pencairan;
+  }, []);
 
-      const honorPerBulan = (Number(item.total_honor) || 0) / jumlahBulan;
-      const dicairkanPerBulan = (Number(item.jumlah_dicairkan) || 0) / jumlahBulan;
+  /* ============================================
+     LIMIT UNTUK SATU BULAN (fallback: label -> bulan/tahun numerik)
+  ============================================ */
+  const getLimitForBulan = useCallback(
+    (bulanLabel: string) => {
+      if (!bulanLabel) return null;
 
-      months.forEach((bulan) => {
-        const key = `${item.sobat_id}__${bulan}`;
-        if (!map[key]) map[key] = { totalHonor: 0, totalDicairkan: 0 };
-        map[key].totalHonor += honorPerBulan;
-        map[key].totalDicairkan += dicairkanPerBulan;
+      const byPeriode = limitList.find((l) => bulanEquals(l.bulan_periode || '', bulanLabel));
+      if (byPeriode) return byPeriode;
+
+      const parsed = parseBulanLabel(bulanLabel);
+      if (!parsed) return null;
+
+      return (
+        limitList.find(
+          (l) => Number(l.bulan) === parsed.idx + 1 && Number(l.tahun) === parsed.year
+        ) || null
+      );
+    },
+    [limitList]
+  );
+
+  /* ============================================
+     PEMAKAIAN LIMIT SEORANG MITRA PADA SATU BULAN
+     (realisasi + rencana yang belum direalisasikan, tidak dihitung dobel)
+  ============================================ */
+  const getMonthlyUsage = useCallback(
+    (sobatId: string, bulan: string) => {
+      const limitObj = getLimitForBulan(bulan);
+      const limit = Number(limitObj?.batas_maksimal) || DEFAULT_LIMIT;
+      const warnPercent = limitObj?.persen_peringatan ?? DEFAULT_WARN_PERCENT;
+
+      let realized = 0;
+      let planned = 0;
+
+      pencairanList.forEach((row) => {
+        if (row.sobat_id !== sobatId) return;
+        if (getRowUsageMonth(row) !== bulan) return;
+
+        const real = row.nominal_dicairkan;
+        if (real !== null && real !== undefined) {
+          realized += Number(real) || 0;
+        } else {
+          planned += Number(row.nominal_rencana) || 0;
+        }
       });
-    });
-    return map;
-  }, [penugasanList]);
 
-  const getLimitForPeriode = useCallback(
-  (periode: string) => {
-    const info = limitList.find((row) =>
-      isMatchingMonth(periode, row.bulan_periode)
-    );
+      const total = realized + planned;
 
-    return {
-      maxLimit: info?.batas_maksimal ?? DEFAULT_LIMIT,
-      warnPercent: info?.persen_peringatan ?? 80,
-    };
-  },
-  [limitList]
-);
+      return { limit, warnPercent, realized, planned, total };
+    },
+    [pencairanList, getLimitForBulan, getRowUsageMonth]
+  );
 
   /* ============================================
      STATS: Total Mitra, Sudah Limit, Masih Tersedia,
      Total Pencairan (untuk periode terpilih)
   ============================================ */
   const stats = useMemo(() => {
-    const { maxLimit } = getLimitForPeriode(periodeBulan);
-
-    // Total mitra pada dashboard mengikuti periode terpilih: hanya mitra
-    // yang kegiatannya MENCAKUP bulan tsb (bukan exact-match teks penuh),
-    // supaya kegiatan multi-bulan ikut terhitung di setiap bulan yang
-    // dilaluinya.
     const mitraPeriode = new Set<string>();
-    penugasanList.forEach((item) => {
-      if (!item.sobat_id) return;
-      const { months } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (months.includes(periodeBulan)) {
-        mitraPeriode.add(item.sobat_id);
-      }
+    pencairanList.forEach((row) => {
+      if (getRowUsageMonth(row) === periodeBulan) mitraPeriode.add(row.sobat_id);
     });
 
     let sudahLimit = 0;
-    let totalPencairanPeriode = 0;
-
     mitraPeriode.forEach((sobatId) => {
-      const acc = accumulatedBySobatPeriode[`${sobatId}__${periodeBulan}`];
-      if (!acc) return;
+      const usage = getMonthlyUsage(sobatId, periodeBulan);
+      if (usage.limit > 0 && usage.total >= usage.limit) sudahLimit += 1;
+    });
 
-      const totalHonor = acc.totalHonor || 0;
-      if (totalHonor >= maxLimit && totalHonor > 0) {
-        sudahLimit += 1;
+    // Total Pencairan = jumlah yang BENAR-BENAR sudah dicairkan (realisasi)
+    // yang bulan_pencairan-nya jatuh di periode terpilih.
+    let totalPencairanPeriode = 0;
+    pencairanList.forEach((row) => {
+      if (getRowUsageMonth(row) !== periodeBulan) return;
+      if (row.nominal_dicairkan !== null && row.nominal_dicairkan !== undefined) {
+        totalPencairanPeriode += Number(row.nominal_dicairkan) || 0;
       }
-
-      totalPencairanPeriode += acc.totalDicairkan || 0;
     });
 
     const totalMitra = mitraPeriode.size;
@@ -361,77 +386,66 @@ export default function DashboardPage() {
       persenSudahLimit: totalMitra > 0 ? Math.round((sudahLimit / totalMitra) * 1000) / 10 : 0,
       persenTersedia: totalMitra > 0 ? Math.round((masihTersedia / totalMitra) * 1000) / 10 : 0,
     };
-  }, [accumulatedBySobatPeriode, penugasanList, periodeBulan, getLimitForPeriode]);
+  }, [pencairanList, periodeBulan, getRowUsageMonth, getMonthlyUsage]);
 
   /* ============================================
      GRAFIK PENCAIRAN
-     Menampilkan 6 bulan kalender terakhir yang memang ada di data.
-     Statistik kartu dan tabel tetap mengikuti periode dropdown.
+     Total REALISASI (nominal_dicairkan) per bulan_pencairan, 6 bulan
+     terakhir yang memang ada datanya.
   ============================================ */
   const disbursementData: DisbursementDataPoint[] = useMemo(() => {
     const totalPerPeriode: Record<string, number> = {};
 
-    penugasanList.forEach((item) => {
-      const { months, jumlahBulan } = parseBulanKegiatan(item.kegiatan?.bulan_kegiatan);
-      if (months.length === 0) return;
-      const dicairkanPerBulan = (Number(item.jumlah_dicairkan) || 0) / jumlahBulan;
-      months.forEach((bulan) => {
-        totalPerPeriode[bulan] = (totalPerPeriode[bulan] || 0) + dicairkanPerBulan;
-      });
+    pencairanList.forEach((row) => {
+      if (row.nominal_dicairkan === null || row.nominal_dicairkan === undefined) return;
+      const bulan = getRowUsageMonth(row);
+      if (!bulan) return;
+      totalPerPeriode[bulan] = (totalPerPeriode[bulan] || 0) + (Number(row.nominal_dicairkan) || 0);
     });
 
-    const periodeList = Object.keys(totalPerPeriode).sort(
+    const periodeListSorted = Object.keys(totalPerPeriode).sort(
       (a, b) => periodeToSortKey(a) - periodeToSortKey(b)
     );
 
-    const last6 = periodeList.slice(-6);
+    const last6 = periodeListSorted.slice(-6);
 
     return last6.map((periode) => ({
       periode,
       total: totalPerPeriode[periode],
     }));
-  }, [penugasanList]);
+  }, [pencairanList, getRowUsageMonth]);
 
   /* ============================================
-     TABEL PEGAWAI MENDEKATI/SUDAH LIMIT (periode terpilih)
+     TABEL PEGAWAI MENDEKATI/SUDAH LIMIT (periode terpilih di dropdown)
   ============================================ */
   const employeeLimitRows: EmployeeLimitRow[] = useMemo(() => {
-    const { maxLimit, warnPercent } = getLimitForPeriode(periodeBulan);
-
     const rows: EmployeeLimitRow[] = [];
 
     mitraList.forEach((mitra) => {
-      const acc = accumulatedBySobatPeriode[`${mitra.sobat_id}__${periodeBulan}`];
-      const terpakai = acc?.totalHonor || 0;
-      if (terpakai <= 0 || maxLimit <= 0) return;
+      const usage = getMonthlyUsage(mitra.sobat_id, periodeBulan);
+      if (usage.total <= 0 || usage.limit <= 0) return;
 
-      const usageRatio = (terpakai / maxLimit) * 100;
-      if (usageRatio < warnPercent) return; // hanya tampilkan yang mendekati/sudah limit
+      const usageRatio = (usage.total / usage.limit) * 100;
+      if (usageRatio < usage.warnPercent) return; // hanya tampilkan yang mendekati/sudah limit
 
       const status: StatusLimit = usageRatio >= 100 ? 'Limit Terlampaui' : 'Mendekati Limit';
 
       rows.push({
         sobatId: mitra.sobat_id,
         namaMitra: mitra.nama_mitra,
-        terpakai,
-        limit: maxLimit,
+        terpakai: usage.total,
+        limit: usage.limit,
         presentase: Math.round(usageRatio),
         status,
       });
     });
 
     return rows.sort((a, b) => b.presentase - a.presentase);
-  }, [mitraList, accumulatedBySobatPeriode, periodeBulan, getLimitForPeriode]);
+  }, [mitraList, periodeBulan, getMonthlyUsage]);
 
   /* ============================================
-     PEMERATAAN PENUGASAN
-     Berbeda dari statistik limit di atas (yang terikat SATU bulan lewat
-     dropdown Periode), section ini butuh rentang yang lebih panjang supaya
-     bermakna — kalau dikunci per-bulan, hampir semua mitra cuma tampil 0
-     atau 1 kegiatan. Karena itu data yang dikirim ke komponennya masih
-     MENTAH per-assignment (lengkap dengan daftar bulan yang dicakup),
-     supaya komponen bisa menghitung ulang sendiri sesuai toggle scope-nya
-     ("Sepanjang Waktu" vs "Tahun Ini") tanpa balik nge-fetch ke server.
+     PEMERATAAN PENUGASAN (tetap berbasis kegiatan.bulan_kegiatan untuk
+     sebaran bulan; Total Honor SEKARANG dihitung dari pencairan_honor)
   ============================================ */
   const mitraForDistribution: WorkDistributionMitra[] = useMemo(
     () => mitraList.map((m) => ({ sobatId: m.sobat_id, namaMitra: m.nama_mitra })),
@@ -446,6 +460,24 @@ export default function DashboardPage() {
     return map;
   }, [mitraList]);
 
+  // ⭐ FIX (inti perbaikan): Total Honor per penugasan TIDAK diambil dari
+  // kolom penugasan.total_honor (sudah tidak diisi lagi), melainkan
+  // dijumlahkan dari pencairan_honor yang penugasan_id-nya cocok.
+  // Prioritas: pakai nominal_dicairkan kalau sudah ada realisasinya,
+  // kalau belum pakai nominal_rencana — konsisten dengan getMonthlyUsage.
+  const totalHonorByPenugasanId = useMemo(() => {
+    const map: Record<number, number> = {};
+    pencairanList.forEach((row) => {
+      if (row.penugasan_id === null || row.penugasan_id === undefined) return;
+      const nilai =
+        row.nominal_dicairkan !== null && row.nominal_dicairkan !== undefined
+          ? Number(row.nominal_dicairkan)
+          : Number(row.nominal_rencana) || 0;
+      map[row.penugasan_id] = (map[row.penugasan_id] || 0) + nilai;
+    });
+    return map;
+  }, [pencairanList]);
+
   const workDistributionAssignments: WorkDistributionAssignment[] = useMemo(() => {
     return penugasanList
       .filter((item) => item.sobat_id)
@@ -454,15 +486,12 @@ export default function DashboardPage() {
         return {
           sobatId: item.sobat_id,
           namaMitra: mitraNameMap[item.sobat_id] || item.sobat_id,
-          totalHonor: Number(item.total_honor) || 0,
+          totalHonor: totalHonorByPenugasanId[item.id] || 0, // ⭐ diganti dari item.total_honor
           months,
         };
       });
-  }, [penugasanList, mitraNameMap]);
+  }, [penugasanList, mitraNameMap, totalHonorByPenugasanId]);
 
-  // Tahun aktif diambil dari periode yang sedang dipilih di dropdown atas
-  // (mis. "Agustus 2026" -> "2026"), dipakai sebagai label & filter untuk
-  // toggle "Tahun Ini" di section pemerataan.
   const tahunAktif = useMemo(() => {
     const parts = periodeBulan.trim().split(/\s+/);
     return parts[1] || String(new Date().getFullYear());
@@ -532,11 +561,6 @@ export default function DashboardPage() {
               <EmployeeLimitTable data={employeeLimitRows} loading={loading} />
             </section>
 
-            {/* PEMERATAAN PENUGASAN — siapa paling sering / belum pernah
-                dapat kegiatan. Punya toggle scope sendiri (Sepanjang Waktu /
-                Tahun Ini), sengaja TIDAK ikut dropdown Periode bulanan di
-                atas karena tujuannya beda: pemerataan beban kerja jangka
-                panjang, bukan status limit honor bulan berjalan. */}
             <WorkDistributionSection
               mitraList={mitraForDistribution}
               assignments={workDistributionAssignments}

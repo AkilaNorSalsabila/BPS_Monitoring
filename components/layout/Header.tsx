@@ -10,7 +10,6 @@ import BellNotification from '@/components/notifications/BellNotification';
 
 // ============================================
 // SUPABASE CLIENT
-// (Idealnya pindahkan ke lib/supabase.ts lalu import di sini)
 // ============================================
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -22,58 +21,174 @@ const supabase = createClient(
   supabasePublishableKey
 );
 
+// ============================================
+// TYPE
+// ============================================
+
 interface HeaderProps {
   onMenuClick: () => void;
 }
+
+type UserRole = 'admin' | 'pegawai' | 'staff' | null;
+
+interface Profile {
+  full_name: string | null;
+  email: string | null;
+  role: string | null;
+  avatar_url: string | null;
+}
+
+// ============================================
+// HEADER
+// ============================================
 
 export default function Header({ onMenuClick }: HeaderProps) {
   const router = useRouter();
 
   const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // ============================================
-  // AMBIL DATA USER YANG SEDANG LOGIN
+  // AMBIL USER + PROFILE
   // ============================================
 
   useEffect(() => {
-    const getUser = async () => {
-      const { data } = await supabase.auth.getUser();
+    let mounted = true;
 
-      if (data.user) {
-        setUser(data.user);
+    const getUserAndProfile = async () => {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          if (mounted) {
+            setUser(null);
+            setProfile(null);
+          }
+
+          return;
+        }
+
+        if (mounted) {
+          setUser(user);
+        }
+
+        // Ambil data profile dari public.profiles
+        const { data: profileData, error: profileError } =
+          await supabase
+            .from('profiles')
+            .select(
+              'full_name, email, role, avatar_url'
+            )
+            .eq('id', user.id)
+            .single();
+
+        if (profileError) {
+          console.error(
+            'Header Profile Error:',
+            profileError
+          );
+
+          if (mounted) {
+            setProfile(null);
+          }
+
+          return;
+        }
+
+        if (mounted) {
+          setProfile(profileData);
+        }
+      } catch (error) {
+        console.error(
+          'Header User Error:',
+          error
+        );
+
+        if (mounted) {
+          setUser(null);
+          setProfile(null);
+        }
       }
     };
 
-    getUser();
+    getUserAndProfile();
 
-    const { data: listener } =
-      supabase.auth.onAuthStateChange((_event, session) => {
-        setUser(session?.user ?? null);
-      });
+    // ============================================
+    // LISTENER AUTH
+    // ============================================
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(
+      async (_event, session) => {
+        if (!mounted) return;
+
+        const currentUser = session?.user ?? null;
+
+        setUser(currentUser);
+
+        if (!currentUser) {
+          setProfile(null);
+          return;
+        }
+
+        const { data: profileData, error } =
+          await supabase
+            .from('profiles')
+            .select(
+              'full_name, email, role, avatar_url'
+            )
+            .eq('id', currentUser.id)
+            .single();
+
+        if (error) {
+          console.error(
+            'Header Profile Error:',
+            error
+          );
+
+          setProfile(null);
+          return;
+        }
+
+        if (mounted) {
+          setProfile(profileData);
+        }
+      }
+    );
 
     return () => {
-      listener.subscription.unsubscribe();
+      mounted = false;
+      subscription.unsubscribe();
     };
   }, []);
 
   // ============================================
-  // TUTUP DROPDOWN PROFILE SAAT KLIK DI LUAR
+  // TUTUP DROPDOWN SAAT KLIK DI LUAR
   // ============================================
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (
         dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as Node)
+        !dropdownRef.current.contains(
+          e.target as Node
+        )
       ) {
         setDropdownOpen(false);
       }
     };
 
-    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener(
+      'mousedown',
+      handleClickOutside
+    );
 
     return () => {
       document.removeEventListener(
@@ -84,25 +199,64 @@ export default function Header({ onMenuClick }: HeaderProps) {
   }, []);
 
   // ============================================
-  // HELPER:
-  // NAMA, INISIAL, ROLE, FOTO
+  // ROLE
+  // ============================================
+
+  const normalizedRole: UserRole =
+    profile?.role === 'admin' ||
+    profile?.role === 'pegawai' ||
+    profile?.role === 'staff'
+      ? profile.role
+      : null;
+
+  // ============================================
+  // NAMA ROLE UNTUK DITAMPILKAN
+  // ============================================
+
+  const displayRole =
+    normalizedRole === 'admin'
+      ? 'Admin'
+      : normalizedRole === 'pegawai'
+        ? 'Pegawai'
+        : normalizedRole === 'staff'
+          ? 'Staff'
+          : 'Pengguna';
+
+  // ============================================
+  // NAMA USER
   // ============================================
 
   const displayName =
+    profile?.full_name ||
     user?.user_metadata?.full_name ||
     user?.email?.split('@')[0] ||
     'Pengguna';
 
-  const displayRole =
-    user?.user_metadata?.role ||
-    'Administrator';
+  // ============================================
+  // EMAIL
+  // ============================================
+
+  const displayEmail =
+    profile?.email ||
+    user?.email ||
+    '';
+
+  // ============================================
+  // AVATAR
+  // ============================================
 
   const avatarUrl =
-    user?.user_metadata?.avatar_url || '';
+    profile?.avatar_url ||
+    user?.user_metadata?.avatar_url ||
+    '';
+
+  // ============================================
+  // INITIAL
+  // ============================================
 
   const initials = displayName
     .trim()
-    .split(' ')
+    .split(/\s+/)
     .map((w: string) => w[0])
     .slice(0, 2)
     .join('')
@@ -114,6 +268,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
+
+    setUser(null);
+    setProfile(null);
 
     router.push('/login');
     router.refresh();
@@ -178,7 +335,6 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
       {/* ============================================
           BAGIAN KANAN
-          PROFILE → BELL
           ============================================ */}
 
       <div className="flex items-center gap-2.5">
@@ -201,6 +357,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
             {/* Nama & Role */}
             <div className="hidden text-right sm:block">
+
               <div className="text-[10px] font-semibold text-slate-800">
                 {displayName}
               </div>
@@ -208,10 +365,12 @@ export default function Header({ onMenuClick }: HeaderProps) {
               <div className="text-[10px] text-slate-400">
                 {displayRole}
               </div>
+
             </div>
 
             {/* Avatar */}
             <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-gradient-to-br from-amber-100 via-orange-100 to-slate-200 text-[10px] font-bold text-slate-600 shadow-sm">
+
               {avatarUrl ? (
                 <img
                   src={avatarUrl}
@@ -221,20 +380,26 @@ export default function Header({ onMenuClick }: HeaderProps) {
               ) : (
                 initials || 'U'
               )}
+
             </div>
           </button>
 
           {/* ============================================
-              PROFILE DROPDOWN MENU
+              PROFILE DROPDOWN
               ============================================ */}
 
           {dropdownOpen && (
             <div className="absolute right-0 top-[46px] z-50 w-60 rounded-xl border border-slate-200 bg-white py-2 shadow-lg">
 
-              {/* Detail Profile */}
+              {/* ============================================
+                  DETAIL PROFILE
+                  ============================================ */}
+
               <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3">
 
+                {/* Avatar */}
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-gradient-to-br from-amber-100 via-orange-100 to-slate-200 text-xs font-bold text-slate-600">
+
                   {avatarUrl ? (
                     <img
                       src={avatarUrl}
@@ -244,20 +409,25 @@ export default function Header({ onMenuClick }: HeaderProps) {
                   ) : (
                     initials || 'U'
                   )}
+
                 </div>
 
+                {/* Informasi */}
                 <div className="min-w-0">
+
                   <div className="truncate text-xs font-semibold text-slate-800">
                     {displayName}
                   </div>
 
                   <div className="truncate text-[11px] text-slate-400">
-                    {user?.email}
+                    {displayEmail}
                   </div>
 
+                  {/* ROLE */}
                   <div className="mt-0.5 inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600">
                     {displayRole}
                   </div>
+
                 </div>
               </div>
 
@@ -311,13 +481,13 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
                 Logout
               </button>
+
             </div>
           )}
         </div>
 
         {/* ============================================
             BELL NOTIFICATION
-            POSISI: DI SEBELAH KANAN PROFILE
             ============================================ */}
 
         <BellNotification />

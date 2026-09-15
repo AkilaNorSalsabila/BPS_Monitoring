@@ -1,23 +1,3 @@
-// =========================================================
-// LOKASI FILE INI: lib/logActivity.ts
-//
-// Helper kecil untuk mencatat log aktivitas dari halaman mana pun.
-// Dipakai setelah aksi tambah/ubah/hapus BERHASIL disimpan ke database.
-//
-// Contoh pakai (di dalam handler submit setelah insert/update/delete sukses):
-//   import { logActivity } from '@/lib/logActivity';
-//   await logActivity({
-//     aksi: 'tambah',
-//     entitas: 'penugasan',
-//     deskripsi: `Menugaskan ${namaMitra} ke kegiatan ${namaKegiatan}`,
-//     referensiId: newId,
-//   });
-//
-// Logging TIDAK PERNAH melempar error ke pemanggilnya — kalau gagal
-// mencatat log, itu tidak boleh membatalkan/mengganggu aksi utama yang
-// sudah berhasil disimpan. Kegagalan cuma dicatat ke console.
-// =========================================================
-
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';

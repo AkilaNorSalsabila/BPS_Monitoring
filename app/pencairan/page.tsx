@@ -2167,87 +2167,68 @@ export default function PencairanPage() {
               </div>
             )}
 
-            {masalahGroups.length > 0 && (
-              <div className="mb-4 space-y-2">
-                {visibleMasalahGroups.map((g) => (
-                  <div
-                    key={`${g.sobatId}__${g.bulan}`}
-                    className={`rounded-lg border px-4 py-3 flex flex-wrap items-center justify-between gap-3 ${
-                      g.melebihi
-                        ? 'bg-rose-50 border-rose-200'
-                        : g.tercapai
-                        ? 'bg-orange-50 border-orange-200'
-                        : g.adaTerlambat
-                        ? 'bg-amber-50 border-amber-200'
-                        : 'bg-yellow-50 border-yellow-200'
-                    }`}
-                  >
-                    <div className="text-xs">
-                      <span className="font-semibold">
-                        {g.melebihi && '🔴 Limit Terlampaui — '}
-                        {!g.melebihi && g.tercapai && '🟠 Limit Tercapai — '}
-                        {!g.melebihi && !g.tercapai && g.mendekati && '⚠️ Mendekati Limit — '}
-                        {g.adaTerlambat && '⏰ Ada Pencairan Terlambat — '}
-                        {g.namaMitra} · {g.bulan}
-                      </span>
+            {/* ================= NOTIFIKASI LIMIT (MENDEKATI/TERCAPAI/TERLAMPAUI/TERLAMBAT) ================= */}
+            {/* Diringkas jadi satu box, gaya sama seperti box "belum direalisasikan" di atas. */}
 
-                      <p className="text-slate-600 mt-0.5">
-                        Beban bulan ini: <strong>{formatRupiah(g.bebanAktual)}</strong>{' '}
-                        dari limit <strong>{formatRupiah(g.limit)}</strong>
+            {masalahGroups.length > 0 && (
+              <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-rose-700">
+                      🔴 {masalahGroups.length} mitra mendekati/melebihi limit atau ada pencairan terlambat
+                    </p>
+                    <p className="text-[11px] text-rose-600 mt-0.5">
+                      Klik salah satu untuk melihat rincian perhitungan limit bulan tersebut.
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-semibold text-rose-700 bg-white border border-rose-200 rounded px-2 py-1">
+                    Perlu perhatian
+                  </span>
+                </div>
+
+                <div className="mt-2 space-y-1">
+                  {visibleMasalahGroups.map((g) => {
+                    const labelUtama = g.melebihi
+                      ? '🔴 Limit Terlampaui'
+                      : g.tercapai
+                      ? '🟠 Limit Tercapai'
+                      : g.mendekati
+                      ? '⚠️ Mendekati Limit'
+                      : '';
+
+                    return (
+                      <button
+                        key={`${g.sobatId}__${g.bulan}`}
+                        type="button"
+                        onClick={() => setDetailGroup({ sobatId: g.sobatId, bulan: g.bulan })}
+                        className="block w-full text-left text-[10px] text-rose-700 hover:underline cursor-pointer"
+                      >
+                        • {labelUtama}
+                        {g.adaTerlambat &&
+                          (labelUtama ? ' · ⏰ Ada Terlambat' : '⏰ Ada Pencairan Terlambat')}
+                        {' — '}
+                        {g.namaMitra} — {g.bulan} — Beban {formatRupiah(g.bebanAktual)} dari{' '}
+                        {formatRupiah(g.limit)}
                         {' · '}
                         {g.sisa >= 0
                           ? `Sisa ${formatRupiah(g.sisa)}`
                           : `Kelebihan ${formatRupiah(Math.abs(g.sisa))}`}
-                      </p>
+                      </button>
+                    );
+                  })}
 
-                      {g.adaTerlambat && (
-                        <p className="text-rose-600 mt-0.5">
-                          Terdapat rencana pencairan yang sudah melewati bulan tetapi
-                          belum direalisasikan.
-                        </p>
-                      )}
-
-                      {g.tercapai && (
-                        <p className="text-orange-700 mt-0.5 font-medium">
-                          Limit bulan ini sudah terpakai penuh (100%). Belum melebihi,
-                          tapi tidak ada sisa lagi.
-                        </p>
-                      )}
-
-                      {g.mendekati && !g.tercapai && !g.melebihi && (
-                        <p className="text-amber-700 mt-0.5">
-                          Penggunaan limit sudah {g.persen.toFixed(1)}%.
-                        </p>
-                      )}
-
-                      {g.melebihi && (
-                        <p className="text-rose-600 mt-0.5 font-medium">
-                          Total beban pencairan sudah melebihi batas bulanan.
-                        </p>
-                      )}
-                    </div>
-
+                  {masalahGroups.length > MASALAH_PREVIEW_COUNT && (
                     <button
-                      onClick={() =>
-                        setDetailGroup({ sobatId: g.sobatId, bulan: g.bulan })
-                      }
-                      className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-medium rounded-md transition cursor-pointer shrink-0"
+                      type="button"
+                      onClick={() => setShowAllMasalah((v) => !v)}
+                      className="text-[10px] text-rose-500 font-semibold hover:underline cursor-pointer"
                     >
-                      Lihat Detail
+                      {showAllMasalah
+                        ? '▲ Tampilkan lebih sedikit'
+                        : `+ ${masalahGroups.length - MASALAH_PREVIEW_COUNT} lainnya`}
                     </button>
-                  </div>
-                ))}
-
-                {masalahGroups.length > MASALAH_PREVIEW_COUNT && (
-                  <button
-                    onClick={() => setShowAllMasalah((v) => !v)}
-                    className="text-xs text-blue-600 hover:underline font-medium px-1 cursor-pointer"
-                  >
-                    {showAllMasalah
-                      ? '▲ Tampilkan lebih sedikit'
-                      : `▼ Tampilkan ${masalahGroups.length - MASALAH_PREVIEW_COUNT} lainnya`}
-                  </button>
-                )}
+                  )}
+                </div>
               </div>
             )}
 
@@ -2488,7 +2469,13 @@ export default function PencairanPage() {
                                           className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
                                           title="Hapus"
                                         >
-                                          🗑️
+                                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M3 6h18" />
+                                            <path d="M8 6V4h8v2" />
+                                            <path d="M19 6l-1 14H6L5 6" />
+                                            <path d="M10 11v5" />
+                                            <path d="M14 11v5" />
+                                          </svg>
                                         </button>
                                       </div>
                                     </td>

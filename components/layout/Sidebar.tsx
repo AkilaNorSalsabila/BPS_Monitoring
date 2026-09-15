@@ -243,9 +243,7 @@ const reportItems = [
 ];
 
 /**
- * ============================================
- * MENU SISTEM
- * ============================================
+ * Menu Sistem.
  */
 
 const systemItems = [
@@ -257,17 +255,20 @@ const systemItems = [
 ];
 
 /**
- * ============================================
- * MENU PENGATURAN
- * ADMIN & PEGAWAI
- * ============================================
- *
- * Pengaturan dapat diakses oleh:
- * - Admin
- * - Pegawai
- *
- * Manajemen Akun tetap hanya Admin.
+ * Menu Pengaturan.
  */
+const settingsItems = [
+  {
+    label: 'Pengaturan',
+    href: '/settings',
+    icon: 'settings' as IconName,
+  },
+  {
+    label: 'Manajemen Akun',
+    href: '/pengaturan-akun',
+    icon: 'users' as IconName,
+  },
+];
 
 const settingsItem = {
   label: 'Pengaturan',
@@ -304,137 +305,12 @@ export default function Sidebar({
    * AMBIL ROLE USER YANG SEDANG LOGIN
    * ============================================
    */
-
-  useEffect(() => {
-    let mounted = true;
-
-    const getUserRole = async () => {
-      try {
-        setLoadingRole(true);
-
-        const {
-          data: { user },
-          error: userError,
-        } = await supabase.auth.getUser();
-
-        if (userError || !user) {
-          if (mounted) {
-            setUserRole(null);
-          }
-
-          return;
-        }
-
-        const {
-          data: profile,
-          error: profileError,
-        } = await supabase
-          .from('profiles')
-          .select('role, status')
-          .eq('id', user.id)
-          .single();
-
-        if (profileError || !profile) {
-          console.error(
-            'Sidebar Profile Error:',
-            profileError
-          );
-
-          if (mounted) {
-            setUserRole(null);
-          }
-
-          return;
-        }
-
-        const role = String(
-          profile.role ?? ''
-        )
-          .trim()
-          .toLowerCase();
-
-        const status = String(
-          profile.status ?? ''
-        )
-          .trim()
-          .toLowerCase();
-
-        /**
-         * Hanya akun approved
-         * yang dianggap mempunyai akses.
-         */
-
-        if (status !== 'approved') {
-          if (mounted) {
-            setUserRole(null);
-          }
-
-          return;
-        }
-
-        if (
-          role === 'admin' ||
-          role === 'pegawai' ||
-          role === 'staff'
-        ) {
-          if (mounted) {
-            setUserRole(role as UserRole);
-          }
-        } else {
-          if (mounted) {
-            setUserRole(null);
-          }
-        }
-      } catch (error) {
-        console.error(
-          'Sidebar Role Error:',
-          error
-        );
-
-        if (mounted) {
-          setUserRole(null);
-        }
-      } finally {
-        if (mounted) {
-          setLoadingRole(false);
-        }
-      }
-    };
-
-    getUserRole();
-
-    /**
-     * Update role/session jika status auth berubah.
-     */
-
-    const {
-      data: authListener,
-    } = supabase.auth.onAuthStateChange(
-      () => {
-        getUserRole();
-      }
-    );
-
-    return () => {
-      mounted = false;
-      authListener.subscription.unsubscribe();
-    };
-  }, []);
-
-  /**
-   * ============================================
-   * RENDER MENU ITEM
-   * ============================================
-   */
-
   const renderMenuItem = (item: {
     label: string;
     href: string;
     icon: IconName;
   }) => {
-    const active =
-      pathname === item.href ||
-      pathname.startsWith(`${item.href}/`);
+    const active = pathname === item.href;
 
     return (
       <Link
@@ -482,11 +358,7 @@ export default function Sidebar({
         {/* LOGO BPS */}
         <div className="flex h-[62px] items-center justify-center border-b border-white/15 px-4">
           <Link
-            href={
-              userRole === 'admin'
-                ? '/dashboard'
-                : '/dashboard/staff'
-            }
+            href="/dashboard"
             onClick={onClose}
             className="flex items-center justify-center"
           >
@@ -500,207 +372,65 @@ export default function Sidebar({
 
         {/* NAVIGASI */}
         <nav className="flex-1 overflow-y-auto px-2.5 py-3 text-[14px]">
+          {/* DASHBOARD */}
+          <div className="mb-3">
+            {renderMenuItem(dashboardItem)}
+          </div>
 
-          {/* ==================================
-              LOADING ROLE
-          ================================== */}
-
-          {loadingRole ? (
-            <div className="px-2 py-2 text-xs text-white/60">
-              Memuat menu...
+          {/* DATA MASTER */}
+          <div className="mb-3">
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Data Master
             </div>
 
-          ) : userRole === 'admin' ? (
-
-            <>
-              {/* ==================================
-                  DASHBOARD ADMIN
-              ================================== */}
-
-              <div className="mb-3">
-                {renderMenuItem(
-                  dashboardAdminItem
-                )}
-              </div>
-
-              {/* ==================================
-                  DATA MASTER
-              ================================== */}
-
-              <div className="mb-3">
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Data Master
-                </div>
-
-                <div className="space-y-0.5">
-                  {dataMasterItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-
-              {/* ==================================
-                  PENUGASAN
-              ================================== */}
-
-              <div className="mb-3">
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Penugasan
-                </div>
-
-                <div className="space-y-0.5">
-                  {assignmentItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-
-              {/* ==================================
-                  LAPORAN
-              ================================== */}
-
-              <div className="mb-3">
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Laporan
-                </div>
-
-                <div className="space-y-0.5">
-                  {reportItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-
-              {/* ==================================
-                  SISTEM
-              ================================== */}
-
-              <div className="mb-3">
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Sistem
-                </div>
-
-                <div className="space-y-0.5">
-                  {systemItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-
-              {/* ==================================
-                  PENGATURAN ADMIN
-              ================================== */}
-
-              <div>
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Pengaturan
-                </div>
-
-                <div className="space-y-0.5">
-                  {/* Pengaturan umum */}
-                  {renderMenuItem(
-                    settingsItem
-                  )}
-
-                  {/* Hanya Admin */}
-                  {renderMenuItem(
-                    accountManagementItem
-                  )}
-                </div>
-              </div>
-            </>
-
-          ) : userRole === 'pegawai' ? (
-
-            <>
-              {/* ==================================
-                  DASHBOARD PEGAWAI
-              ================================== */}
-
-              <div className="mb-3">
-                {renderMenuItem(
-                  dashboardStaffItem
-                )}
-              </div>
-
-              {/* ==================================
-                  LAPORAN PEGAWAI
-              ================================== */}
-
-              <div className="mb-3">
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Laporan
-                </div>
-
-                <div className="space-y-0.5">
-                  {reportItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-
-              {/* ==================================
-                  PENGATURAN PEGAWAI
-              ================================== */}
-
-              <div>
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Pengaturan
-                </div>
-
-                <div className="space-y-0.5">
-                  {/* Pegawai hanya dapat
-                      mengakses Pengaturan */}
-                  {renderMenuItem(
-                    settingsItem
-                  )}
-                </div>
-              </div>
-            </>
-
-          ) : userRole === 'staff' ? (
-
-            <>
-              {/* ==================================
-                  DASHBOARD STAFF
-              ================================== */}
-
-              <div className="mb-3">
-                {renderMenuItem(
-                  dashboardStaffItem
-                )}
-              </div>
-
-              {/* ==================================
-                  LAPORAN STAFF
-              ================================== */}
-
-              <div>
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Laporan
-                </div>
-
-                <div className="space-y-0.5">
-                  {reportItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-            </>
-
-          ) : (
-
-            <div className="px-2 py-2 text-xs text-white/70">
-              Tidak ada menu yang tersedia.
+            <div className="space-y-0.5">
+              {dataMasterItems.map((item) => renderMenuItem(item))}
             </div>
-          )}
+          </div>
 
+          {/* PENUGASAN */}
+          <div className="mb-3">
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Penugasan
+            </div>
+
+            <div className="space-y-0.5">
+              {assignmentItems.map((item) => renderMenuItem(item))}
+            </div>
+          </div>
+
+          {/* LAPORAN */}
+          <div className="mb-3">
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Laporan
+            </div>
+
+            <div className="space-y-0.5">
+              {reportItems.map((item) => renderMenuItem(item))}
+            </div>
+          </div>
+
+          {/* SISTEM */}
+          <div className="mb-3">
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Sistem
+            </div>
+
+            <div className="space-y-0.5">
+              {systemItems.map((item) => renderMenuItem(item))}
+            </div>
+          </div>
+
+          {/* PENGATURAN */}
+          <div>
+            <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+              Pengaturan
+            </div>
+
+            <div className="space-y-0.5">
+              {settingsItems.map((item) => renderMenuItem(item))}
+            </div>
+          </div>
         </nav>
       </aside>
     </>

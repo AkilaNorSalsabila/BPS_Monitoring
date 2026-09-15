@@ -596,6 +596,10 @@ export default function RekapBulananPage() {
      1. Rekap Kegiatan
      2. Detail Mitra per Kegiatan (honor vs realisasi per mitra)
      3. Riwayat Pencairan (mengikuti filter periode pencairan)
+
+     ⭐ FIX: kolom "Metode Pembayaran" dan "No. Referensi SP2D" dihapus
+     dari sheet Riwayat Pencairan sesuai permintaan — tidak perlu
+     ditampilkan di file Excel yang diunduh.
   ============================================ */
   const handleExportExcel = async () => {
     if (filteredRekap.length === 0) {
@@ -671,6 +675,8 @@ export default function RekapBulananPage() {
       XLSX.utils.book_append_sheet(workbook, wsDetailMitra, 'Detail Mitra per Kegiatan');
 
       // --- SHEET 3: RIWAYAT PENCAIRAN (transparansi/akuntabilitas) ---
+      // ⭐ FIX: 'Metode Pembayaran' dan 'No. Referensi SP2D' tidak lagi
+      // disertakan sebagai kolom di sheet ini.
       const riwayatRows = filteredRiwayat.map((row, index) => ({
         No: index + 1,
         Kegiatan: row.namaKegiatan,
@@ -680,8 +686,6 @@ export default function RekapBulananPage() {
         'Tanggal Realisasi': row.tglPencairan ? formatTanggalPendek(row.tglPencairan) : 'Belum cair',
         'Nominal Dicairkan':
           row.nominalDicairkan !== null && row.nominalDicairkan !== undefined ? row.nominalDicairkan : 0,
-        'Metode Pembayaran': row.metodePembayaran || '-',
-        'No. Referensi SP2D': row.noReferensiSp2d || '-',
         Catatan: row.catatan || '-',
       }));
 
@@ -698,14 +702,12 @@ export default function RekapBulananPage() {
         { wch: 16 },
         { wch: 18 },
         { wch: 20 },
-        { wch: 20 },
-        { wch: 22 },
         { wch: 30 },
       ];
       XLSX.utils.book_append_sheet(workbook, wsRiwayat, 'Riwayat Pencairan');
 
       const tanggal = new Date().toISOString().slice(0, 10);
-      XLSX.writeFile(workbook, `Rekap-Anggaran-Kegiatan-${tanggal}.xlsx`);
+      XLSX.writeFile(workbook, `Rekap-Kegiatan-${tanggal}.xlsx`);
     } catch (err) {
       console.error('Gagal export excel:', err);
       alert('Gagal mengekspor ke Excel. Pastikan package "xlsx" sudah terpasang (npm install xlsx).');
@@ -715,6 +717,8 @@ export default function RekapBulananPage() {
   /* ============================================
      CETAK PDF — jsPDF + autoTable, kop surat BPS,
      berisi 3 tabel: Rekap Kegiatan, Detail Mitra per Kegiatan, Riwayat Pencairan
+
+     ⭐ FIX: kolom "No. Ref SP2D" dihapus dari tabel Riwayat Pencairan.
   ============================================ */
   const handleCetakPDF = () => {
     if (filteredRekap.length === 0) {
@@ -842,6 +846,7 @@ export default function RekapBulananPage() {
     doc.text('3. Riwayat Pencairan (Transparansi & Akuntabilitas)', 14, startYTabel3 - 4);
     doc.setFont('helvetica', 'normal');
 
+    // ⭐ FIX: kolom "No. Ref SP2D" dihapus dari body & head tabel ini.
     const riwayatBody =
       filteredRiwayat.length > 0
         ? filteredRiwayat.map((row, index) => [
@@ -852,30 +857,28 @@ export default function RekapBulananPage() {
             row.bulanPencairan || '-',
             row.tglPencairan ? formatTanggalPendek(row.tglPencairan) : 'Belum cair',
             row.nominalDicairkan ? formatRupiah(Number(row.nominalDicairkan)) : '-',
-            row.noReferensiSp2d || '-',
           ])
-        : [['-', 'Belum ada riwayat pencairan untuk kegiatan pada filter ini.', '', '', '', '', '', '']];
+        : [['-', 'Belum ada riwayat pencairan untuk kegiatan pada filter ini.', '', '', '', '', '']];
 
     autoTable(doc, {
       startY: startYTabel3,
-      head: [['No', 'Kegiatan', 'Mitra', 'SOBAT ID', 'Bulan Rencana', 'Tgl Realisasi', 'Nominal', 'No. Ref SP2D']],
+      head: [['No', 'Kegiatan', 'Mitra', 'SOBAT ID', 'Bulan Rencana', 'Tgl Realisasi', 'Nominal']],
       body: riwayatBody,
       theme: 'grid',
       headStyles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontSize: 8, fontStyle: 'bold' },
       bodyStyles: { fontSize: 7.5 },
       columnStyles: {
         0: { cellWidth: 10, halign: 'center' },
-        1: { cellWidth: 55 },
-        2: { cellWidth: 40 },
-        3: { cellWidth: 28 },
-        4: { cellWidth: 28 },
-        5: { cellWidth: 28 },
-        6: { cellWidth: 32, halign: 'right' },
-        7: { cellWidth: 32 },
+        1: { cellWidth: 60 },
+        2: { cellWidth: 45 },
+        3: { cellWidth: 32 },
+        4: { cellWidth: 32 },
+        5: { cellWidth: 32 },
+        6: { cellWidth: 38, halign: 'right' },
       },
     });
 
-    doc.save(`Rekap-Anggaran-Kegiatan-${new Date().toISOString().slice(0, 10)}.pdf`);
+    doc.save(`Rekap-Kegiatan-${new Date().toISOString().slice(0, 10)}.pdf`);
   };
 
   return (
@@ -883,7 +886,7 @@ export default function RekapBulananPage() {
       <Sidebar mobileOpen={mobileSidebarOpen} onClose={() => setMobileSidebarOpen(false)} />
 
       <div className="min-h-screen lg:pl-[230px]">
-        <Header onMenuClick={() => setMobileSidebarOpen(true)} />
+        <Header title="Rekap Kegiatan" onMenuClick={() => setMobileSidebarOpen(true)} />
 
         <main className="p-3 sm:p-4 lg:p-5">
           <div className="mx-auto max-w-[1500px]">
@@ -891,10 +894,11 @@ export default function RekapBulananPage() {
 
             <div className="mb-4 flex flex-wrap justify-between items-center gap-3">
               <div>
-                <h1 className="text-lg font-bold text-slate-800">Rekap Bulanan</h1>
+                <h1 className="text-lg font-bold text-slate-800">Rekap Kegiatan</h1>
                 <p className="text-[11px] text-slate-500">
-                  Rekap anggaran per kegiatan, lengkap dengan mitra yang ditugaskan &amp; status pencairannya — file
-                  yang diunduh sudah termasuk detail mitra dan riwayat pencairan lengkap untuk transparansi
+                  Rekap anggaran per kegiatan (pagu ditampilkan utuh untuk seluruh masa kegiatan, tidak dipotong per
+                  bulan), lengkap dengan mitra yang ditugaskan &amp; status pencairannya — file yang diunduh sudah
+                  termasuk detail mitra dan riwayat pencairan lengkap untuk transparansi
                 </p>
               </div>
 
@@ -921,7 +925,7 @@ export default function RekapBulananPage() {
             {!loading && (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 mb-4">
                 <div className="bg-white p-3 rounded-lg shadow-sm border border-slate-200">
-                  <p className="text-[11px] text-slate-500 mb-1">Total Pagu Anggaran</p>
+                  <p className="text-[11px] text-slate-500 mb-1">Total Pagu Anggaran (per kegiatan)</p>
                   <p className="text-sm font-bold text-slate-800">{formatRupiah(summaryTotals.totalPagu)}</p>
                 </div>
                 <div className="bg-white p-3 rounded-lg shadow-sm border border-slate-200">
