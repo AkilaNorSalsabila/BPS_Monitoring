@@ -102,6 +102,34 @@ interface MonthlyUsage {
   percentage: number;
 }
 
+// ⭐ BARU: pemakaian limit yang SUDAH memperhitungkan "cadangan" untuk
+// rencana terlambat milik mitra yang sama. Rencana terlambat (belum
+// dicairkan, bulan rencananya sudah lewat) pasti akan mendarat di bulan
+// berjalan begitu benar-benar direalisasikan, jadi kapasitasnya harus
+// dikunci sejak sekarang supaya rencana baru tidak menempati kursi yang
+// sebenarnya sudah "dipesan".
+interface ProjectedUsage extends MonthlyUsage {
+  // Total nominal rencana terlambat yang dicadangkan di bulan ini.
+  cadanganTerlambat: number;
+
+  // total + cadanganTerlambat
+  proyeksiTotal: number;
+
+  // limit - proyeksiTotal (bisa negatif)
+  sisaEfektif: number;
+}
+
+// Kelompok mitra yang rencana terlambatnya berpotensi menumpuk di bulan
+// berjalan — inilah isi notifikasi "perlu tindak lanjut admin".
+interface RisikoTumpukan {
+  sobatId: string;
+  namaMitra: string;
+  bulanTujuan: string;
+  rowsTerlambat: PencairanRow[];
+  usage: ProjectedUsage;
+  kelebihan: number;
+}
+
 interface MasalahGroup {
   sobatId: string;
   namaMitra: string;
@@ -151,6 +179,8 @@ const DEFAULT_WARN_PERCENT = 80;
 const MASALAH_PREVIEW_COUNT = 2;
 
 const PERHATIAN_PREVIEW_COUNT = 3;
+
+const RISIKO_PREVIEW_COUNT = 2;
 
 // =========================================================
 // HELPERS
@@ -215,10 +245,10 @@ const addMonths = (label: string, n: number): string => {
   return `${NAMA_BULAN_ID[idx]} ${year}`;
 };
 
-// ⭐ PERUBAHAN (dari sesi sebelumnya): disamakan dengan hook Bell
-// (useMasalahMitra.ts) supaya "akhir bulan" dihitung jam 23:59:59.999
-// di hari terakhir bulan itu, bukan jam 00:00:00. Ini membuat status
-// "terlambat" konsisten antara halaman Pencairan dan notifikasi Bell.
+// Disamakan dengan hook Bell (useMasalahMitra.ts) supaya "akhir bulan"
+// dihitung jam 23:59:59.999 di hari terakhir bulan itu, bukan jam
+// 00:00:00. Ini membuat status "terlambat" konsisten antara halaman
+// Pencairan dan notifikasi Bell.
 const isBulanLewat = (label: string): boolean => {
   const parsed = parseBulanLabel(label);
   if (!parsed) return false;
@@ -227,6 +257,14 @@ const isBulanLewat = (label: string): boolean => {
   const endOfBulan = new Date(parsed.year, parsed.idx + 1, 0, 23, 59, 59, 999);
 
   return endOfBulan < now;
+};
+
+// ⭐ BARU: label bulan berjalan (bulan kalender hari ini). Ini bulan
+// tujuan default untuk semua rencana yang sudah terlambat, karena
+// realisasi paling cepat hanya bisa terjadi sekarang.
+const getBulanBerjalanLabel = (): string => {
+  const now = new Date();
+  return `${NAMA_BULAN_ID[now.getMonth()]} ${now.getFullYear()}`;
 };
 
 const labelToMonthInput = (label: string): string => {
@@ -264,11 +302,7 @@ const isActualMonthAfterPlanned = (actual: string, planned: string): boolean => 
 };
 
 // Bandingkan dua label bulan berdasarkan (tahun, bulan) yang sudah
-// dinormalisasi, BUKAN kesamaan string mentah. Ini supaya variasi
-// format kecil (mis. spasi ganda "September  2026", huruf besar/kecil)
-// tidak membuat 2 label yang sebenarnya sama dianggap berbeda — yang
-// sebelumnya bisa membuat bulan yang sudah punya rencana tetap muncul
-// lagi di form karena perbandingan string persisnya gagal cocok.
+// dinormalisasi, BUKAN kesamaan string mentah.
 const bulanEquals = (a: string, b: string): boolean => {
   const ka = monthLabelToKey(a);
   const kb = monthLabelToKey(b);
@@ -429,23 +463,9 @@ export default function PencairanPage() {
     tahap_ke: null,
   });
 
-  // Nominal per bulan untuk mode "rencana bertahap" (multi-bulan).
-  // key = label bulan (mis. "September 2026"), value = nominal rencana bulan itu.
-  // Dipakai saat TAMBAH maupun EDIT rencana untuk penugasan yang periode
-  // kegiatannya lebih dari 1 bulan. Bulan yang dikosongkan (0) tidak
-  // akan dibuatkan/disimpan barisnya di database.
   const [multiMonthAmounts, setMultiMonthAmounts] = useState<Record<string, number>>({});
-
-  // Mapping bulan -> id baris pencairan_honor yang SUDAH ADA di database
-  // untuk penugasan yang sedang diedit/dibuka. Dipakai supaya saat mode
-  // bertahap, kita tahu bulan mana yang harus di-UPDATE (row id ada),
-  // di-INSERT (belum ada row-nya), atau di-DELETE (row ada tapi nominal
-  // dikosongkan jadi 0).
   const [multiMonthRowIds, setMultiMonthRowIds] = useState<Record<string, number>>({});
 
-  // Pencarian penugasan (combobox) — supaya admin bisa mengetik nama
-  // mitra / nama kegiatan / SOBAT ID untuk menyaring daftar penugasan,
-  // alih-alih men-scroll dropdown panjang satu per satu.
   const [penugasanSearchQuery, setPenugasanSearchQuery] = useState('');
   const [isPenugasanDropdownOpen, setIsPenugasanDropdownOpen] = useState(false);
   const penugasanInputRef = useRef<HTMLInputElement | null>(null);
@@ -466,17 +486,14 @@ export default function PencairanPage() {
     bulan: string;
   } | null>(null);
 
-  // Expand/collapse per mitra di tabel.
   const [expandedMitraIds, setExpandedMitraIds] = useState<Set<string>>(new Set());
 
-  // Notifikasi masalah limit — dibatasi tampil dulu, bisa dibuka semua.
   const [showAllMasalah, setShowAllMasalah] = useState(false);
-
-  // Notifikasi "terlambat" dan "belum realisasi/kurang" juga dibatasi
-  // tampil dulu (supaya notifikasi tidak memakan banyak tempat), tapi
-  // baris "+ N lainnya" di bawahnya harus bisa diklik untuk membuka semua.
-  const [showAllOverdue, setShowAllOverdue] = useState(false);
   const [showAllPerluTindakLanjut, setShowAllPerluTindakLanjut] = useState(false);
+  const [showAllRisiko, setShowAllRisiko] = useState(false);
+
+  // Bulan kalender berjalan — tujuan mendarat semua rencana terlambat.
+  const bulanBerjalan = useMemo(() => getBulanBerjalanLabel(), []);
 
   // =========================================================
   // FETCH
@@ -586,89 +603,6 @@ export default function PencairanPage() {
   }, [fetchAll]);
 
   // =========================================================
-  // AUTO OPEN DARI PENUGASAN
-  // =========================================================
-
-  useEffect(() => {
-    if (autoOpenHandled) return;
-
-    const penugasanIdFromUrl = searchParams.get('penugasan_id');
-    if (!penugasanIdFromUrl) return;
-
-    if (penugasanOptions.length === 0) return;
-
-    const targetId = Number(penugasanIdFromUrl);
-    const penugasan = penugasanOptions.find((p) => p.id === targetId);
-
-    if (penugasan) {
-      setIsEditMode(false);
-      setFormData({
-        penugasan_id: targetId,
-        bulan_pencairan: getFirstAvailableMonth(penugasan),
-        nominal_rencana: 0,
-        tahap_ke: null,
-      });
-      setMultiMonthAmounts({});
-      setMultiMonthRowIds({});
-      setPenugasanSearchQuery(`${penugasan.nama_mitra} — ${penugasan.nama_kegiatan}`);
-      setIsPenugasanDropdownOpen(false);
-      setIsFormOpen(true);
-    }
-
-    setAutoOpenHandled(true);
-  }, [autoOpenHandled, searchParams, penugasanOptions]);
-
-  // =========================================================
-  // AUTO OPEN DETAIL DARI NOTIFIKASI HEADER
-  // =========================================================
-
-  useEffect(() => {
-  const detailSobatId = searchParams.get('detail_sobat_id');
-  const detailBulan = searchParams.get('detail_bulan');
-
-  if (!detailSobatId || !detailBulan) return;
-  if (loading) return;
-
-  /*
-   * Cari berdasarkan BULAN YANG MEMBEBANI LIMIT,
-   * bukan hanya bulan_pencairan.
-   *
-   * Belum realisasi:
-   *   bulan beban = bulan_pencairan
-   *
-   * Sudah realisasi:
-   *   bulan beban = bulan dari tgl_pencairan
-   */
-  const hasData = rows.some((r) => {
-    if (r.sobat_id !== detailSobatId) return false;
-
-    const sudahRealisasi =
-      r.nominal_dicairkan !== null &&
-      r.nominal_dicairkan !== undefined;
-
-    if (sudahRealisasi && r.tgl_pencairan) {
-      const bulanRealisasi = monthInputToLabel(
-        r.tgl_pencairan.slice(0, 7)
-      );
-
-      return bulanRealisasi === detailBulan;
-    }
-
-    return r.bulan_pencairan === detailBulan;
-  });
-
-  if (!hasData) return;
-
-  setDetailGroup({
-    sobatId: detailSobatId,
-    bulan: detailBulan,
-  });
-
-  // Bersihkan query URL setelah modal berhasil dibuka
-  window.history.replaceState({}, '', '/pencairan');
-}, [searchParams, rows, loading]);
-
-  // =========================================================
   // LIMIT
   // =========================================================
 
@@ -699,12 +633,8 @@ export default function PencairanPage() {
   //
   // Row belum direalisasi: dihitung nominal_rencana
   // Row sudah direalisasi: dihitung nominal_dicairkan
-  // (rencana yang sudah direalisasi TIDAK dihitung dua kali)
   // =========================================================
 
-  // Bulan yang benar-benar membebani limit:
-  // - belum realisasi -> bulan rencana
-  // - sudah realisasi -> bulan dari tgl_pencairan
   const getRowUsageMonth = useCallback((row: PencairanRow): string => {
     const sudahRealisasi = row.nominal_dicairkan !== null && row.nominal_dicairkan !== undefined;
 
@@ -728,7 +658,7 @@ export default function PencairanPage() {
       rows.forEach((row) => {
         if (row.sobat_id !== sobatId) return;
         if (excludeRowId !== undefined && row.id === excludeRowId) return;
-        if (getRowUsageMonth(row) !== bulan) return;
+        if (!bulanEquals(getRowUsageMonth(row), bulan)) return;
 
         const real = row.nominal_dicairkan;
 
@@ -749,12 +679,223 @@ export default function PencairanPage() {
   );
 
   // =========================================================
-  // DETEKSI MASALAH
+  // ⭐ CADANGAN UNTUK RENCANA TERLAMBAT
   //
-  // Tiga status yang saling eksklusif untuk beban bulan ini:
-  // - melebihi : total  > limit
-  // - tercapai : total == limit (persis 100%, belum lebih)
-  // - mendekati: total  < limit tapi >= ambang peringatan (mis. 80%)
+  // Kasus yang dituju (masukan mentor):
+  //   Rencana Agustus Rp3jt belum dicairkan sampai Agustus habis.
+  //   Realisasi paling cepat baru bisa September, jadi Rp3jt itu PASTI
+  //   akan menempati limit September. Kalau September dibiarkan terlihat
+  //   "kosong", admin akan mengisinya dengan rencana/penugasan baru,
+  //   lalu rencana Agustus tadi terdorong ke Oktober, dan seterusnya
+  //   mundur terus (efek domino).
+  //
+  // Maka: selama rencana terlambat itu BELUM dicairkan atau BELUM
+  // dipindahkan, nominalnya dicadangkan di bulan berjalan. Rencana baru
+  // di bulan berjalan hanya boleh dibuat kalau masih ada SISA EFEKTIF
+  // (limit - beban nyata - cadangan). Kalau sisanya masih cukup, tetap
+  // boleh — yang diblokir hanya yang benar-benar tidak muat.
+  //
+  // Cadangan hanya membebani BULAN BERJALAN, bukan seluruh bulan ke
+  // depan. Kalau tidak, satu rencana terlambat akan mengunci semua bulan
+  // dan admin tidak bisa menjadwalkan apa pun.
+  // =========================================================
+
+  const rowsTerlambatByMitra = useMemo(() => {
+    const map = new Map<string, PencairanRow[]>();
+
+    rows.forEach((r) => {
+      if (getRowStatus(r) !== 'terlambat') return;
+      if (bulanEquals(r.bulan_pencairan, bulanBerjalan)) return;
+
+      const list = map.get(r.sobat_id) || [];
+      list.push(r);
+      map.set(r.sobat_id, list);
+    });
+
+    return map;
+  }, [rows, bulanBerjalan]);
+
+  const getCadanganTerlambat = useCallback(
+    (sobatId: string, bulan: string, excludeRowId?: number): number => {
+      if (!bulanEquals(bulan, bulanBerjalan)) return 0;
+
+      return (rowsTerlambatByMitra.get(sobatId) || [])
+        .filter((r) => r.id !== excludeRowId)
+        .reduce((sum, r) => sum + (Number(r.nominal_rencana) || 0), 0);
+    },
+    [rowsTerlambatByMitra, bulanBerjalan]
+  );
+
+  const getRowsTerlambat = useCallback(
+    (sobatId: string, excludeRowId?: number): PencairanRow[] =>
+      (rowsTerlambatByMitra.get(sobatId) || []).filter((r) => r.id !== excludeRowId),
+    [rowsTerlambatByMitra]
+  );
+
+  // Dipakai di SEMUA tempat yang menilai "muat atau tidak" untuk rencana
+  // baru / pemindahan rencana.
+  const getProjectedUsage = useCallback(
+    (sobatId: string, bulan: string, excludeRowId?: number): ProjectedUsage => {
+      const usage = getMonthlyUsage(sobatId, bulan, excludeRowId);
+      const cadanganTerlambat = getCadanganTerlambat(sobatId, bulan, excludeRowId);
+      const proyeksiTotal = usage.total + cadanganTerlambat;
+
+      return {
+        ...usage,
+        cadanganTerlambat,
+        proyeksiTotal,
+        sisaEfektif: usage.limit - proyeksiTotal,
+      };
+    },
+    [getMonthlyUsage, getCadanganTerlambat]
+  );
+
+  // Pesan blokir yang menjelaskan KENAPA rencana tidak bisa ditambahkan,
+  // dan apa yang harus admin lakukan lebih dulu.
+  const buildBlokirCadanganMessage = useCallback(
+    (
+      sobatId: string,
+      namaMitra: string,
+      bulan: string,
+      nominal: number,
+      usage: ProjectedUsage,
+      excludeRowId?: number
+    ): string => {
+      const daftarTerlambat = getRowsTerlambat(sobatId, excludeRowId)
+        .map((r) => `   • ${r.bulan_pencairan} — ${formatRupiah(r.nominal_rencana)}`)
+        .join('\n');
+
+      return (
+        `Rencana ${formatRupiah(nominal)} untuk ${namaMitra} di bulan ${bulan} tidak dapat disimpan.\n\n` +
+        `Mitra ini masih punya rencana pencairan yang TERLAMBAT dan belum dicairkan:\n` +
+        `${daftarTerlambat}\n\n` +
+        `Rencana terlambat itu hanya bisa direalisasikan paling cepat bulan ${bulanBerjalan}, ` +
+        `sehingga akan membebani limit bulan ${bulanBerjalan}. Kapasitasnya sudah dicadangkan ` +
+        `supaya tidak saling menumpuk.\n\n` +
+        `Limit ${bulan}: ${formatRupiah(usage.limit)}\n` +
+        `Sudah dijadwalkan/terealisasi: ${formatRupiah(usage.total)}\n` +
+        `Dicadangkan untuk rencana terlambat: ${formatRupiah(usage.cadanganTerlambat)}\n` +
+        `Sisa efektif: ${formatRupiah(Math.max(usage.sisaEfektif, 0))}\n\n` +
+        `Tindak lanjut: cairkan (tandai realisasi) rencana terlambat tersebut lebih dulu, ` +
+        `atau pindahkan ke bulan lain yang masih punya kapasitas. Kalau sisa efektifnya ` +
+        `masih cukup, rencana baru tetap bisa dibuat.`
+      );
+    },
+    [getRowsTerlambat, bulanBerjalan]
+  );
+
+  // Kelompok mitra yang perlu tindak lanjut admin sekarang juga.
+  const risikoTumpukanGroups = useMemo<RisikoTumpukan[]>(() => {
+    const result: RisikoTumpukan[] = [];
+
+    rowsTerlambatByMitra.forEach((rowsTerlambat, sobatId) => {
+      const usage = getProjectedUsage(sobatId, bulanBerjalan);
+      if (usage.cadanganTerlambat <= 0) return;
+
+      result.push({
+        sobatId,
+        namaMitra: rowsTerlambat[0]?.mitra?.nama_mitra || sobatId,
+        bulanTujuan: bulanBerjalan,
+        rowsTerlambat,
+        usage,
+        kelebihan:
+          usage.limit > 0 ? Math.max(usage.proyeksiTotal - usage.limit, 0) : 0,
+      });
+    });
+
+    return result.sort((a, b) => b.kelebihan - a.kelebihan);
+  }, [rowsTerlambatByMitra, getProjectedUsage, bulanBerjalan]);
+
+  // =========================================================
+  // AUTO OPEN DARI PENUGASAN
+  // =========================================================
+
+  const getFirstAvailableMonth = useCallback(
+    (penugasan: PenugasanOption | undefined) => {
+      if (!penugasan) return '';
+
+      const months = penugasan.periodeOptions || [];
+      if (months.length === 0) return '';
+
+      const available = months.find((bulan) => {
+        const alreadyPlanned = rows.some(
+          (r) =>
+            r.penugasan_id === penugasan.id &&
+            bulanEquals(r.bulan_pencairan || '', bulan)
+        );
+        if (alreadyPlanned) return false;
+
+        const limitObj = getLimitForBulan(bulan);
+        if (!limitObj) return false;
+
+        // Pakai sisa EFEKTIF supaya bulan berjalan yang kapasitasnya
+        // sudah dipesan rencana terlambat tidak dipilih otomatis.
+        const usage = getProjectedUsage(penugasan.sobat_id, bulan);
+        return usage.sisaEfektif > 0;
+      });
+
+      return available || months[0] || '';
+    },
+    [rows, getLimitForBulan, getProjectedUsage]
+  );
+
+  useEffect(() => {
+    if (autoOpenHandled) return;
+
+    const penugasanIdFromUrl = searchParams.get('penugasan_id');
+    if (!penugasanIdFromUrl) return;
+
+    if (penugasanOptions.length === 0) return;
+
+    const targetId = Number(penugasanIdFromUrl);
+    const penugasan = penugasanOptions.find((p) => p.id === targetId);
+
+    if (penugasan) {
+      setIsEditMode(false);
+      setFormData({
+        penugasan_id: targetId,
+        bulan_pencairan: getFirstAvailableMonth(penugasan),
+        nominal_rencana: 0,
+        tahap_ke: null,
+      });
+      setMultiMonthAmounts({});
+      setMultiMonthRowIds({});
+      setPenugasanSearchQuery(`${penugasan.nama_mitra} — ${penugasan.nama_kegiatan}`);
+      setIsPenugasanDropdownOpen(false);
+      setIsFormOpen(true);
+    }
+
+    setAutoOpenHandled(true);
+  }, [autoOpenHandled, searchParams, penugasanOptions, getFirstAvailableMonth]);
+
+  // =========================================================
+  // AUTO OPEN DETAIL DARI NOTIFIKASI HEADER
+  // =========================================================
+
+  useEffect(() => {
+    const detailSobatId = searchParams.get('detail_sobat_id');
+    const detailBulan = searchParams.get('detail_bulan');
+
+    if (!detailSobatId || !detailBulan) return;
+    if (loading) return;
+
+    const hasData = rows.some((r) => {
+      if (r.sobat_id !== detailSobatId) return false;
+      return bulanEquals(getRowUsageMonth(r), detailBulan);
+    });
+
+    if (!hasData) return;
+
+    setDetailGroup({
+      sobatId: detailSobatId,
+      bulan: detailBulan,
+    });
+
+    window.history.replaceState({}, '', '/pencairan');
+  }, [searchParams, rows, loading, getRowUsageMonth]);
+
+  // =========================================================
+  // DETEKSI MASALAH LIMIT
   // =========================================================
 
   const masalahGroups = useMemo<MasalahGroup[]>(() => {
@@ -775,7 +916,7 @@ export default function PencairanPage() {
       const usage = getMonthlyUsage(sobatId, bulan);
 
       const sumberRows = rows.filter(
-        (r) => r.sobat_id === sobatId && getRowUsageMonth(r) === bulan
+        (r) => r.sobat_id === sobatId && bulanEquals(getRowUsageMonth(r), bulan)
       );
 
       const adaTerlambat = sumberRows.some((r) => getRowStatus(r) === 'terlambat');
@@ -793,11 +934,6 @@ export default function PencairanPage() {
         usage.limit > 0 &&
         usage.percentage >= warnPercent;
 
-      // Ditampilkan kalau:
-      // 1. limit terlampaui
-      // 2. limit persis tercapai (100%)
-      // 3. mendekati limit
-      // 4. ada pencairan terlambat
       if (melebihi || tercapai || mendekati || adaTerlambat) {
         const namaMitra = sumberRows[0]?.mitra?.nama_mitra || sobatId;
 
@@ -840,11 +976,6 @@ export default function PencairanPage() {
     ? masalahGroups
     : masalahGroups.slice(0, MASALAH_PREVIEW_COUNT);
 
-  // Rencana yang BELUM direalisasikan (menunggu — belum lewat bulan, jadi
-  // beda dari "terlambat" yang sudah punya notifikasi sendiri) ATAU yang
-  // REALISASINYA KURANG dari rencana. Dua kondisi ini digabung jadi satu
-  // notifikasi "perlu ditindaklanjuti" supaya admin tidak perlu membuka
-  // tiap mitra satu-satu untuk menemukannya.
   const perluTindakLanjutRows = useMemo(
     () =>
       rows.filter((r) => {
@@ -856,14 +987,6 @@ export default function PencairanPage() {
 
   // =========================================================
   // RESCHEDULE SUGGESTION
-  //
-  // Strategi dua tahap:
-  // 1. Coba cari bulan kandidat DI DALAM periode kegiatan (perilaku lama).
-  // 2. Kalau tidak ada satupun bulan dalam periode yang punya sisa limit
-  //    cukup (mis. periode kegiatan cuma 1 bulan), coba cari bulan lain
-  //    DI LUAR periode kegiatan — tetap harus belum lewat & sisa limit
-  //    cukup. Hasilnya ditandai `diLuarPeriode` supaya UI bisa memberi
-  //    peringatan dan admin yang memutuskan.
   // =========================================================
 
   const findRescheduleSuggestion = useCallback(
@@ -878,16 +1001,20 @@ export default function PencairanPage() {
       const allowedMonths = penugasan?.periodeOptions || [];
 
       const cariBulan = (hanyaDalamPeriode: boolean): RescheduleSuggestion | null => {
-        for (let i = 1; i <= 12; i++) {
+        for (let i = 0; i <= 12; i++) {
+          // i = 0 supaya bulan berjalan ikut dipertimbangkan sebagai
+          // tujuan ketika rencananya sudah terlambat.
           const candidateBulan = addMonths(fromBulan, i);
 
-          // Jangan pernah menyarankan bulan yang sudah lewat.
+          if (bulanEquals(candidateBulan, fromBulan) && !isBulanLewat(fromBulan)) {
+            continue;
+          }
           if (isBulanLewat(candidateBulan)) continue;
 
           if (
             hanyaDalamPeriode &&
             allowedMonths.length > 0 &&
-            !allowedMonths.includes(candidateBulan)
+            !allowedMonths.some((m) => bulanEquals(m, candidateBulan))
           ) {
             continue;
           }
@@ -895,20 +1022,18 @@ export default function PencairanPage() {
           const limitObj = getLimitForBulan(candidateBulan);
           if (!limitObj) continue;
 
-          // "Tidak boleh numpuk" di sini berarti tidak boleh melebihi
-          // limit bulan itu — bukan berarti bulannya harus 0 rencana
-          // sama sekali. Kalau bulan itu sudah ada rencana lain (dari
-          // kegiatan yang sama atau beda) tapi sisa limitnya masih
-          // cukup menampung nominal yang dipindah, tetap boleh dipakai.
-          const usage = getMonthlyUsage(row.sobat_id, candidateBulan, row.id);
-          const sisa = limitObj.batas_maksimal - usage.total;
+          // Sisa EFEKTIF: sudah dikurangi cadangan rencana terlambat
+          // (kecuali baris ini sendiri, yang memang sedang dipindahkan).
+          const usage = getProjectedUsage(row.sobat_id, candidateBulan, row.id);
+          const sisa = limitObj.batas_maksimal - usage.proyeksiTotal;
 
           if (sisa >= amountToMove) {
             return {
               bulan: candidateBulan,
               sisaLimit: sisa,
               diLuarPeriode:
-                allowedMonths.length > 0 && !allowedMonths.includes(candidateBulan),
+                allowedMonths.length > 0 &&
+                !allowedMonths.some((m) => bulanEquals(m, candidateBulan)),
             };
           }
         }
@@ -916,14 +1041,12 @@ export default function PencairanPage() {
         return null;
       };
 
-      // 1) Coba dulu di dalam periode kegiatan.
       const dalamPeriode = cariBulan(true);
       if (dalamPeriode) return dalamPeriode;
 
-      // 2) Kalau tidak ketemu, baru coba di luar periode kegiatan.
       return cariBulan(false);
     },
-    [penugasanOptions, getMonthlyUsage, getLimitForBulan]
+    [penugasanOptions, getProjectedUsage, getLimitForBulan]
   );
 
   // =========================================================
@@ -942,14 +1065,10 @@ export default function PencairanPage() {
 
     const penugasan = penugasanOptions.find((p) => p.id === row.penugasan_id);
 
-    // Bulan di luar periode kegiatan TIDAK diblokir total lagi — hanya
-    // diberi peringatan di konfirmasi, karena reschedule ke luar periode
-    // kadang memang satu-satunya opsi (mis. periode kegiatan cuma 1 bulan).
     const diLuarPeriode =
       !!penugasan?.periodeOptions?.length &&
-      !penugasan.periodeOptions.includes(bulanBaru);
+      !penugasan.periodeOptions.some((m) => bulanEquals(m, bulanBaru));
 
-    const targetUsage = getMonthlyUsage(row.sobat_id, bulanBaru, row.id);
     const targetLimit = getLimitForBulan(bulanBaru);
 
     if (!targetLimit) {
@@ -957,13 +1076,22 @@ export default function PencairanPage() {
       return;
     }
 
-    const sisa = targetLimit.batas_maksimal - targetUsage.total;
+    const targetUsage = getProjectedUsage(row.sobat_id, bulanBaru, row.id);
+    const sisa = targetLimit.batas_maksimal - targetUsage.proyeksiTotal;
 
     if (Number(row.nominal_rencana) > sisa) {
       alert(
-        `Bulan ${bulanBaru} tidak memiliki sisa limit yang cukup. Sisa limit: ${formatRupiah(
-          sisa
-        )}, sedangkan rencana yang dipindahkan: ${formatRupiah(row.nominal_rencana)}.`
+        `Bulan ${bulanBaru} tidak memiliki sisa limit yang cukup.\n\n` +
+          `Limit: ${formatRupiah(targetLimit.batas_maksimal)}\n` +
+          `Sudah dijadwalkan/terealisasi: ${formatRupiah(targetUsage.total)}\n` +
+          (targetUsage.cadanganTerlambat > 0
+            ? `Dicadangkan untuk rencana terlambat lain: ${formatRupiah(
+                targetUsage.cadanganTerlambat
+              )}\n`
+            : '') +
+          `Sisa efektif: ${formatRupiah(Math.max(sisa, 0))}\n` +
+          `Rencana yang dipindahkan: ${formatRupiah(row.nominal_rencana)}\n\n` +
+          `Cairkan atau pindahkan dulu rencana terlambat mitra ini, atau pilih bulan lain.`
       );
       return;
     }
@@ -1046,7 +1174,7 @@ export default function PencairanPage() {
   }, [rows, bulanFilter, mitraFilter, statusFilter]);
 
   // =========================================================
-  // GROUPING PER MITRA (tampilan tabel)
+  // GROUPING PER MITRA
   // =========================================================
 
   const groupedRows = useMemo<MitraGroup[]>(() => {
@@ -1094,9 +1222,6 @@ export default function PencairanPage() {
     return groups;
   }, [filteredRows]);
 
-  // Badge ringkas status per mitra: menunjukkan kondisi paling
-  // mendesak di antara semua rencana pencairan mitra itu (setelah
-  // filter aktif), urutannya: terlambat > lebih > kurang > menunggu.
   const getGroupStatusBadge = useCallback((group: MitraGroup) => {
     const statuses = group.items.map((r) => getRowStatus(r));
     const total = statuses.length;
@@ -1167,15 +1292,6 @@ export default function PencairanPage() {
     [penugasanOptions, formData.penugasan_id]
   );
 
-  // ⭐ PERUBAHAN: Daftar penugasan yang BELUM punya rencana pencairan
-  // sama sekali. Ini yang boleh muncul & dipilih di form TAMBAH RENCANA
-  // PENCAIRAN. Begitu sebuah penugasan sudah punya minimal 1 baris di
-  // `pencairan_honor` — mau itu masih rencana, sudah direalisasikan
-  // sebagian (kurang/lebih), atau sudah direalisasikan penuh (sesuai)
-  // — penugasan itu TIDAK BOLEH tampil lagi di daftar Tambah, karena
-  // aturan bisnisnya adalah "satu penugasan = satu rencana pencairan".
-  // Tidak berlaku untuk mode EDIT, karena edit memang untuk penugasan
-  // yang sudah punya rencana.
   const availablePenugasanOptionsForAdd = useMemo(
     () =>
       penugasanOptions.filter(
@@ -1184,15 +1300,6 @@ export default function PencairanPage() {
     [penugasanOptions, rows]
   );
 
-  // Daftar penugasan yang sudah disaring sesuai kata kunci pencarian
-  // (nama mitra / nama kegiatan / SOBAT ID) untuk combobox pemilihan
-  // penugasan, supaya admin tidak perlu men-scroll dropdown panjang.
-  //
-  // ⭐ PERUBAHAN: saat mode TAMBAH, basis pencariannya adalah
-  // `availablePenugasanOptionsForAdd` (yang belum punya rencana sama
-  // sekali) — bukan seluruh `penugasanOptions` lagi. Saat mode EDIT,
-  // dropdown ini memang tidak dipakai (input disabled), tapi tetap
-  // dijaga konsisten memakai daftar penuh.
   const filteredPenugasanOptions = useMemo(() => {
     const basis = isEditMode ? penugasanOptions : availablePenugasanOptionsForAdd;
     const q = penugasanSearchQuery.trim().toLowerCase();
@@ -1212,9 +1319,6 @@ export default function PencairanPage() {
     penugasanSearchQuery,
   ]);
 
-  // Mode "rencana bertahap": berlaku baik saat TAMBAH maupun EDIT, kalau
-  // periode kegiatan penugasan ini lebih dari 1 bulan. Kalau cuma 1
-  // bulan, form tetap pakai tampilan lama (1 dropdown bulan + 1 nominal).
   const isMultiMonthMode = useMemo(
     () =>
       !!selectedPenugasanForForm &&
@@ -1231,12 +1335,6 @@ export default function PencairanPage() {
     [multiMonthAmounts]
   );
 
-  // Cari rencana pencairan yang SUDAH ADA untuk kombinasi penugasan+bulan
-  // tertentu. Dipakai supaya bulan yang sudah punya rencana tidak bisa
-  // dipilih/diisi lagi dari form yang sama (mencegah duplikat), baik di
-  // mode 1 bulan maupun mode bertahap. `excludeRowId` dipakai saat edit
-  // supaya baris yang sedang diedit tidak menganggap dirinya sendiri
-  // sebagai "sudah ada".
   const getExistingRencanaForBulan = useCallback(
     (penugasanId: number, bulan: string, excludeRowId?: number) => {
       return (
@@ -1251,16 +1349,6 @@ export default function PencairanPage() {
     [rows]
   );
 
-  // Satu penugasan hanya boleh mempunyai SATU rencana pencairan aktif.
-  // Jika sudah ada minimal satu baris pencairan_honor untuk penugasan ini,
-  // penambahan rencana baru diblokir, walaupun rencana lama baru terisi 1 bulan.
-  // Edit rencana yang sudah ada tetap diperbolehkan.
-  //
-  // Catatan: sekarang kasus ini seharusnya sudah jarang tercapai lewat UI,
-  // karena `availablePenugasanOptionsForAdd` sudah menyaring penugasan
-  // yang sudah punya rencana dari daftar combobox sejak awal. Blok ini
-  // tetap dipertahankan sebagai pengaman kedua (defense in depth), misalnya
-  // untuk kondisi race-condition (dua tab dibuka bersamaan).
   const existingRencanaForSelectedPenugasan = useMemo(() => {
     if (isEditMode || !selectedPenugasanForForm) return [];
     return rows.filter((r) => r.penugasan_id === selectedPenugasanForForm.id);
@@ -1269,8 +1357,16 @@ export default function PencairanPage() {
   const hasExistingRencanaForSelectedPenugasan =
     existingRencanaForSelectedPenugasan.length > 0;
 
+  // Rencana terlambat milik mitra yang sedang dipilih di form — dipakai
+  // untuk menampilkan peringatan langsung di dalam form.
+  const rowsTerlambatForForm = useMemo(() => {
+    if (!selectedPenugasanForForm) return [];
+    const currentRowId = isEditMode && formData.id ? Number(formData.id) : undefined;
+    return getRowsTerlambat(selectedPenugasanForForm.sobat_id, currentRowId);
+  }, [selectedPenugasanForForm, isEditMode, formData.id, getRowsTerlambat]);
+
   // =========================================================
-  // SISA LIMIT FORM
+  // SISA LIMIT FORM (sudah memperhitungkan cadangan terlambat)
   // =========================================================
 
   const sisaLimitUntukForm = useMemo(() => {
@@ -1282,12 +1378,18 @@ export default function PencairanPage() {
     const limitObj = getLimitForBulan(formData.bulan_pencairan);
 
     if (!limitObj) {
-      return { unset: true, sisa: 0, limit: 0 };
+      return {
+        unset: true,
+        sisa: 0,
+        limit: 0,
+        digunakan: 0,
+        cadangan: 0,
+      };
     }
 
     const currentRowId = isEditMode && formData.id ? Number(formData.id) : undefined;
 
-    const usage = getMonthlyUsage(
+    const usage = getProjectedUsage(
       penugasan.sobat_id,
       formData.bulan_pencairan,
       currentRowId
@@ -1295,49 +1397,20 @@ export default function PencairanPage() {
 
     return {
       unset: false,
-      sisa: limitObj.batas_maksimal - usage.total,
+      sisa: limitObj.batas_maksimal - usage.proyeksiTotal,
       limit: limitObj.batas_maksimal,
       digunakan: usage.total,
+      cadangan: usage.cadanganTerlambat,
     };
-  }, [formData, penugasanOptions, getLimitForBulan, getMonthlyUsage, isEditMode]);
+  }, [formData, penugasanOptions, getLimitForBulan, getProjectedUsage, isEditMode]);
 
   // =========================================================
   // OPEN ADD / EDIT
   // =========================================================
 
-  const getFirstAvailableMonth = useCallback(
-    (penugasan: PenugasanOption | undefined) => {
-      if (!penugasan) return '';
-
-      const months = penugasan.periodeOptions || [];
-      if (months.length === 0) return '';
-
-      const available = months.find((bulan) => {
-        // Lewati bulan yang sudah punya rencana untuk penugasan ini.
-        const alreadyPlanned = rows.some(
-          (r) =>
-            r.penugasan_id === penugasan.id &&
-            bulanEquals(r.bulan_pencairan || '', bulan)
-        );
-        if (alreadyPlanned) return false;
-
-        const limitObj = getLimitForBulan(bulan);
-        if (!limitObj) return false;
-
-        const usage = getMonthlyUsage(penugasan.sobat_id, bulan);
-        return limitObj.batas_maksimal - usage.total > 0;
-      });
-
-      return available || months[0] || '';
-    },
-    [rows, getLimitForBulan, getMonthlyUsage]
-  );
-
   const handleOpenAddForm = () => {
     setIsEditMode(false);
 
-    // ⭐ PERUBAHAN: default pilihan pertama diambil dari penugasan yang
-    // BELUM punya rencana sama sekali, bukan dari seluruh penugasan.
     const firstPenugasan = availablePenugasanOptionsForAdd[0];
 
     setFormData({
@@ -1358,10 +1431,6 @@ export default function PencairanPage() {
     setIsFormOpen(true);
   };
 
-  // Edit satu baris. Kalau penugasan baris ini punya periode kegiatan
-  // lebih dari 1 bulan, form dibuka dalam mode bertahap: SEMUA bulan
-  // dalam periode kegiatan ditampilkan sekaligus (seperti form tambah),
-  // masing-masing diisi otomatis dari rencana yang sudah ada (kalau ada).
   const handleOpenEditForm = (row: PencairanRow) => {
     setIsEditMode(true);
 
@@ -1375,9 +1444,6 @@ export default function PencairanPage() {
     const isMultiBulan = periodeOptions.length > 1;
 
     if (isMultiBulan) {
-      // Ambil semua baris pencairan_honor milik penugasan ini, supaya
-      // form edit menampilkan seluruh bulan dalam periode kegiatan,
-      // bukan cuma 1 baris yang diklik.
       const existingRows = rows.filter((r) => r.penugasan_id === row.penugasan_id);
 
       const amounts: Record<string, number> = {};
@@ -1408,11 +1474,6 @@ export default function PencairanPage() {
 
   const getPenugasanLabel = (p: PenugasanOption) => `${p.nama_mitra} — ${p.nama_kegiatan}`;
 
-  // Dipanggil ketika admin memilih salah satu hasil pencarian penugasan
-  // di combobox. Perilakunya menyamai onChange dropdown lama: bulan
-  // pencairan direset ke bulan pertama yang tersedia (kalau bukan mode
-  // edit), dan input rencana bertahap ikut direset karena daftar
-  // bulannya bisa jadi berbeda untuk penugasan baru.
   const handleSelectPenugasan = (p: PenugasanOption) => {
     setFormData((prev) => ({
       ...prev,
@@ -1427,10 +1488,6 @@ export default function PencairanPage() {
     setIsPenugasanDropdownOpen(false);
   };
 
-  // Buka daftar penugasan seperti dropdown biasa: kosongkan kata kunci
-  // supaya SEMUA penugasan tampil dulu (tidak ikut tersaring oleh nama
-  // yang sedang terpilih), lalu admin bisa langsung klik salah satu atau
-  // mulai mengetik untuk menyaring.
   const handleOpenPenugasanDropdown = () => {
     if (isEditMode) return;
     setPenugasanSearchQuery('');
@@ -1438,9 +1495,6 @@ export default function PencairanPage() {
     penugasanInputRef.current?.focus();
   };
 
-  // Tutup daftar & kembalikan teks di kotak pencarian ke penugasan yang
-  // sedang terpilih (kalau ada), supaya kotaknya tidak kosong walau
-  // admin tadi sempat mengetik kata kunci tapi tidak memilih apa-apa.
   const handleClosePenugasanDropdown = () => {
     setIsPenugasanDropdownOpen(false);
     setPenugasanSearchQuery(
@@ -1463,14 +1517,8 @@ export default function PencairanPage() {
     }
 
     // =========================================================
-    // SATU PENUGASAN = SATU RENCANA (hanya berlaku saat TAMBAH BARU)
+    // SATU PENUGASAN = SATU RENCANA (hanya saat TAMBAH BARU)
     // =========================================================
-    // Jika penugasan sudah memiliki minimal satu rencana pencairan,
-    // rencana baru tidak boleh dibuat lagi. Edit rencana yang sudah ada
-    // tetap diperbolehkan.
-    //
-    // Cek state lokal terlebih dahulu. Setelah itu cek langsung ke Supabase
-    // sebagai pengaman jika data berubah dari tab/user lain.
     if (!isEditMode) {
       const existingPlansInState = rows.filter(
         (r) => r.penugasan_id === penugasan.id
@@ -1497,7 +1545,10 @@ export default function PencairanPage() {
 
       if (existingPlansError) {
         console.error('Gagal memeriksa rencana pencairan yang sudah ada:', existingPlansError);
-        alert('Gagal memeriksa rencana pencairan yang sudah ada: ' + (existingPlansError.message || 'Unknown error'));
+        alert(
+          'Gagal memeriksa rencana pencairan yang sudah ada: ' +
+            (existingPlansError.message || 'Unknown error')
+        );
         return;
       }
 
@@ -1518,15 +1569,6 @@ export default function PencairanPage() {
 
     // =========================================================
     // CABANG RENCANA BERTAHAP (MULTI-BULAN)
-    //
-    // Dipakai kalau periode kegiatan penugasan > 1 bulan, baik saat
-    // TAMBAH maupun EDIT. Setiap bulan dalam periode kegiatan diproses
-    // independen berdasarkan nominal yang diisi admin:
-    // - Bulan tanpa row lama & nominal > 0  -> INSERT baris baru
-    // - Bulan dengan row lama & nominal > 0 -> UPDATE baris tsb
-    // - Bulan dengan row lama & nominal = 0 -> DELETE baris tsb
-    //   (kecuali sudah direalisasikan; itu diblokir validasi di bawah)
-    // - Bulan tanpa row lama & nominal = 0  -> dilewati saja
     // =========================================================
     if (isMultiMonthMode && selectedPenugasanForForm) {
       const monthsData = (selectedPenugasanForForm.periodeOptions || []).map(
@@ -1545,8 +1587,7 @@ export default function PencairanPage() {
         return;
       }
 
-      // Validasi: bulan yang sudah direalisasikan tidak boleh diubah
-      // nominalnya (baik diedit ke nilai lain maupun dikosongkan/dihapus).
+      // Bulan yang sudah direalisasikan tidak boleh diubah dari form ini.
       for (const m of toProcess) {
         if (!m.existingId) continue;
 
@@ -1563,9 +1604,7 @@ export default function PencairanPage() {
         }
       }
 
-      // Validasi tiap bulan yang nominalnya > 0 terhadap sisa limit
-      // bulan itu sendiri (independen antar bulan, dan mengecualikan
-      // baris itu sendiri dari perhitungan pemakaian kalau sedang diedit).
+      // Validasi tiap bulan terhadap SISA EFEKTIF bulan itu.
       for (const m of toProcess) {
         if (m.nominal <= 0) continue;
 
@@ -1578,19 +1617,32 @@ export default function PencairanPage() {
           return;
         }
 
-        const usage = getMonthlyUsage(penugasan.sobat_id, m.bulan, m.existingId);
-        const sisa = limitObj.batas_maksimal - usage.total;
+        const usage = getProjectedUsage(penugasan.sobat_id, m.bulan, m.existingId);
+        const sisa = limitObj.batas_maksimal - usage.proyeksiTotal;
 
         if (m.nominal > sisa) {
-          alert(
-            `Rencana bulan ${m.bulan} sebesar ${formatRupiah(
-              m.nominal
-            )} melebihi sisa limit bulan itu.\n\nLimit: ${formatRupiah(
-              limitObj.batas_maksimal
-            )}\nSudah digunakan: ${formatRupiah(usage.total)}\nSisa: ${formatRupiah(
-              Math.max(sisa, 0)
-            )}`
-          );
+          if (usage.cadanganTerlambat > 0) {
+            alert(
+              buildBlokirCadanganMessage(
+                penugasan.sobat_id,
+                penugasan.nama_mitra,
+                m.bulan,
+                m.nominal,
+                usage,
+                m.existingId
+              )
+            );
+          } else {
+            alert(
+              `Rencana bulan ${m.bulan} sebesar ${formatRupiah(
+                m.nominal
+              )} melebihi sisa limit bulan itu.\n\nLimit: ${formatRupiah(
+                limitObj.batas_maksimal
+              )}\nSudah digunakan: ${formatRupiah(usage.total)}\nSisa: ${formatRupiah(
+                Math.max(sisa, 0)
+              )}`
+            );
+          }
           return;
         }
       }
@@ -1660,8 +1712,7 @@ export default function PencairanPage() {
     }
 
     // =========================================================
-    // CABANG SINGLE-BULAN (mendukung tahap ke yang bisa diisi manual,
-    // dipakai untuk tambah 1 bulan maupun edit satu baris)
+    // CABANG SINGLE-BULAN
     // =========================================================
 
     const nominal = Number(formData.nominal_rencana) || 0;
@@ -1671,12 +1722,15 @@ export default function PencairanPage() {
       return;
     }
 
-    // VALIDASI BULAN SESUAI PERIODE KEGIATAN
     if (
       selectedPenugasanForForm?.periodeOptions &&
       selectedPenugasanForForm.periodeOptions.length > 0
     ) {
-      if (!selectedPenugasanForForm.periodeOptions.includes(formData.bulan_pencairan)) {
+      if (
+        !selectedPenugasanForForm.periodeOptions.some((m) =>
+          bulanEquals(m, formData.bulan_pencairan || '')
+        )
+      ) {
         alert(
           `Bulan pencairan harus berada di dalam periode kegiatan: ${
             selectedPenugasanForForm.bulanKegiatanRaw || '-'
@@ -1686,7 +1740,6 @@ export default function PencairanPage() {
       }
     }
 
-    // VALIDASI LIMIT
     if (sisaLimitUntukForm?.unset) {
       alert(
         `Limit honor untuk bulan ${formData.bulan_pencairan} belum diatur. Atur limit dulu sebelum membuat rencana.`
@@ -1695,15 +1748,36 @@ export default function PencairanPage() {
     }
 
     if (sisaLimitUntukForm && nominal > sisaLimitUntukForm.sisa) {
-      const sisa = Math.max(sisaLimitUntukForm.sisa, 0);
+      const currentRowId = isEditMode && formData.id ? Number(formData.id) : undefined;
 
-      alert(
-        `Rencana pencairan ${formatRupiah(nominal)} melebihi sisa limit bulan ${
-          formData.bulan_pencairan
-        } sebesar ${formatRupiah(sisa)}.\n\nLimit: ${formatRupiah(
-          sisaLimitUntukForm.limit
-        )}\nSudah digunakan: ${formatRupiah(sisaLimitUntukForm.digunakan || 0)}`
-      );
+      if ((sisaLimitUntukForm.cadangan || 0) > 0) {
+        const usage = getProjectedUsage(
+          penugasan.sobat_id,
+          formData.bulan_pencairan,
+          currentRowId
+        );
+
+        alert(
+          buildBlokirCadanganMessage(
+            penugasan.sobat_id,
+            penugasan.nama_mitra,
+            formData.bulan_pencairan,
+            nominal,
+            usage,
+            currentRowId
+          )
+        );
+      } else {
+        const sisa = Math.max(sisaLimitUntukForm.sisa, 0);
+
+        alert(
+          `Rencana pencairan ${formatRupiah(nominal)} melebihi sisa limit bulan ${
+            formData.bulan_pencairan
+          } sebesar ${formatRupiah(sisa)}.\n\nLimit: ${formatRupiah(
+            sisaLimitUntukForm.limit
+          )}\nSudah digunakan: ${formatRupiah(sisaLimitUntukForm.digunakan || 0)}`
+        );
+      }
       return;
     }
 
@@ -1827,15 +1901,12 @@ export default function PencairanPage() {
   // =========================================================
   // VALIDASI REALISASI
   //
-  // Contoh: Limit Oktober = 3 jt. A = rencana 2 jt, B = rencana 1 jt.
-  // Ketika A direalisasikan: A dikeluarkan dari perhitungan sementara,
-  // B tetap dihitung 1 jt, realisasi baru A ditambahkan.
-  // 1 jt + 2 jt = 3 jt -> BOLEH. 1 jt + 2,5 jt = 3,5 jt -> DITOLAK.
-  //
-  // Catatan: setiap tahap/bulan pada rencana bertahap punya baris
-  // sendiri, sehingga realisasi tetap dilakukan per baris/tahap
-  // masing-masing — validasi ini otomatis berlaku sama untuk baris
-  // dari rencana bertahap maupun rencana satu bulan biasa.
+  // Catatan penting: realisasi adalah PENCATATAN FAKTA pembayaran, jadi
+  // yang diblokir keras di sini tetap beban NYATA (realisasi + rencana
+  // lain di bulan itu). Cadangan rencana terlambat milik mitra yang sama
+  // hanya ditampilkan sebagai informasi, supaya admin tahu sisa limit
+  // bulan ini masih akan tergerus. Blokir keras berlaku di pembuatan
+  // rencana baru (handleSaveForm) dan pemindahan (handleReschedule).
   // =========================================================
 
   const getRealisasiValidation = useCallback(
@@ -1853,7 +1924,7 @@ export default function PencairanPage() {
         return {
           valid: false,
           message: 'Tanggal realisasi wajib diisi dengan tanggal yang valid.',
-          usage: null,
+          usage: null as ProjectedUsage | null,
           remainingAfter: 0,
           bulanRealisasi: '',
           terlambat: false,
@@ -1866,7 +1937,7 @@ export default function PencairanPage() {
         return {
           valid: false,
           message: `Limit honor bulan realisasi ${bulanRealisasi} belum diatur.`,
-          usage: null,
+          usage: null as ProjectedUsage | null,
           remainingAfter: 0,
           bulanRealisasi,
           terlambat: isActualMonthAfterPlanned(
@@ -1876,9 +1947,7 @@ export default function PencairanPage() {
         };
       }
 
-      // Target dikeluarkan dari perhitungan karena nilai rencananya akan
-      // digantikan oleh nominal realisasi pada bulan aktual.
-      const usageOthers = getMonthlyUsage(
+      const usageOthers = getProjectedUsage(
         target.sobat_id,
         bulanRealisasi,
         target.id
@@ -1922,7 +1991,7 @@ export default function PencairanPage() {
         terlambat,
       };
     },
-    [getMonthlyUsage, getLimitForBulan]
+    [getProjectedUsage, getLimitForBulan]
   );
 
   // =========================================================
@@ -2036,83 +2105,157 @@ export default function PencairanPage() {
               </button>
             </div>
 
-            {/* ================= NOTIFIKASI TERLAMBAT ================= */}
+            {/* ============ NOTIFIKASI RISIKO TUMPUKAN (PRIORITAS 1) ============ */}
+            {/* Rencana terlambat yang belum dicairkan otomatis mencadangkan
+                kapasitas di bulan berjalan. Selama belum ditindaklanjuti,
+                rencana/penugasan baru di bulan ini akan ditolak kalau sisa
+                efektifnya tidak cukup.
 
-            {(() => {
-              const overdueRows = rows.filter(
-                (r) =>
-                  (r.nominal_dicairkan === null || r.nominal_dicairkan === undefined) &&
-                  isBulanLewat(r.bulan_pencairan)
-              );
+                Notifikasi "sudah melewati bulan rencana" yang sebelumnya ada
+                di sini SENGAJA dihapus karena isinya (daftar rencana
+                terlambat per mitra) sudah tercakup di blok ini — supaya
+                tidak dobel. */}
 
-              if (overdueRows.length === 0) return null;
-
-              return (
-                <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-bold text-rose-700">
-                        ⏰ {overdueRows.length} rencana pencairan sudah melewati bulan rencana
-                      </p>
-                      <p className="text-[11px] text-rose-600 mt-0.5">
-                        Rencana tidak otomatis dipindahkan. Saat benar-benar direalisasikan,
-                        pemakaian limit akan mengikuti bulan dari tanggal realisasi.
-                      </p>
-                    </div>
-                    <span className="text-[10px] font-semibold text-rose-700 bg-white border border-rose-200 rounded px-2 py-1">
-                      Perlu tindakan admin
-                    </span>
+            {risikoTumpukanGroups.length > 0 && (
+              <div className="mb-3 rounded-lg border-2 border-orange-300 bg-orange-50 px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-orange-800">
+                      ⚠️ {risikoTumpukanGroups.length} mitra punya pencairan terlambat yang harus dicairkan lebih dulu
+                    </p>
+                    <p className="text-[11px] text-orange-700 mt-0.5">
+                      Rencana yang sudah lewat bulannya hanya bisa direalisasikan paling
+                      cepat di <strong>{bulanBerjalan}</strong>, jadi limit {bulanBerjalan}{' '}
+                      untuk mitra tersebut sudah <strong>dicadangkan</strong>. Selama belum
+                      dicairkan atau dipindahkan, rencana pencairan baru di bulan ini akan
+                      ditolak bila sisanya tidak cukup — supaya jadwal tidak saling menumpuk
+                      dan terus mundur ke bulan berikutnya.
+                    </p>
                   </div>
+                  <span className="text-[10px] font-semibold text-white bg-orange-600 rounded px-2 py-1 shrink-0">
+                    Perlu tindak lanjut admin
+                  </span>
+                </div>
 
-                  <div className="mt-2 space-y-1.5">
-                    {(showAllOverdue ? overdueRows : overdueRows.slice(0, 3)).map((r) => {
-                      const suggestion = findRescheduleSuggestion(
-                        r,
-                        r.bulan_pencairan,
-                        Number(r.nominal_rencana) || 0
-                      );
-
-                      return (
-                        <div key={r.id} className="flex flex-wrap items-center justify-between gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setDetailGroup({ sobatId: r.sobat_id, bulan: r.bulan_pencairan })}
-                            className="text-left text-[10px] text-rose-700 hover:underline cursor-pointer"
-                          >
-                            • {r.mitra?.nama_mitra || r.sobat_id} — {r.bulan_pencairan} — {formatRupiah(r.nominal_rencana)}
-                          </button>
-
-                          {suggestion && (
-                            <button
-                              type="button"
-                              onClick={() => handleReschedule(r, suggestion.bulan)}
-                              className="text-[10px] px-2 py-0.5 bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 rounded transition cursor-pointer shrink-0"
-                              title={`Sisa limit bulan ${suggestion.bulan}: ${formatRupiah(suggestion.sisaLimit)}`}
-                            >
-                              💡 Pindah ke {suggestion.bulan}
-                              {suggestion.diLuarPeriode && (
-                                <span className="ml-1 text-rose-400">(di luar periode)</span>
-                              )}
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                    {overdueRows.length > 3 && (
+                <div className="mt-2.5 space-y-2">
+                  {(showAllRisiko
+                    ? risikoTumpukanGroups
+                    : risikoTumpukanGroups.slice(0, RISIKO_PREVIEW_COUNT)
+                  ).map((g) => (
+                    <div
+                      key={g.sobatId}
+                      className="rounded-md bg-white border border-orange-200 px-3 py-2"
+                    >
                       <button
                         type="button"
-                        onClick={() => setShowAllOverdue((v) => !v)}
-                        className="text-[10px] text-rose-500 font-semibold hover:underline cursor-pointer"
+                        onClick={() =>
+                          setDetailGroup({ sobatId: g.sobatId, bulan: g.bulanTujuan })
+                        }
+                        className="block w-full text-left text-[11px] font-bold text-orange-800 hover:underline cursor-pointer"
                       >
-                        {showAllOverdue
-                          ? '▲ Tampilkan lebih sedikit'
-                          : `+ ${overdueRows.length - 3} rencana lainnya`}
+                        {g.namaMitra} — dampak ke limit {g.bulanTujuan}
                       </button>
-                    )}
-                  </div>
+
+                      <p className="text-[10px] text-slate-600 mt-0.5 leading-relaxed">
+                        Sudah dijadwalkan/terealisasi:{' '}
+                        <strong>{formatRupiah(g.usage.total)}</strong>
+                        {' · '}
+                        Dicadangkan untuk rencana terlambat:{' '}
+                        <strong className="text-orange-700">
+                          {formatRupiah(g.usage.cadanganTerlambat)}
+                        </strong>
+                        {' · '}
+                        Proyeksi total:{' '}
+                        <strong>{formatRupiah(g.usage.proyeksiTotal)}</strong> dari{' '}
+                        {g.usage.limit > 0
+                          ? formatRupiah(g.usage.limit)
+                          : 'limit belum diatur'}
+                        {g.usage.limit > 0 && (
+                          <>
+                            {' · '}
+                            {g.usage.sisaEfektif >= 0 ? (
+                              <span className="text-emerald-700 font-semibold">
+                                Sisa efektif {formatRupiah(g.usage.sisaEfektif)}
+                              </span>
+                            ) : (
+                              <span className="text-rose-600 font-semibold">
+                                Kelebihan {formatRupiah(Math.abs(g.usage.sisaEfektif))}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </p>
+
+                      <div className="mt-1.5 space-y-1 border-t border-orange-100 pt-1.5">
+                        {g.rowsTerlambat.map((r) => {
+                          const suggestion = findRescheduleSuggestion(
+                            r,
+                            r.bulan_pencairan,
+                            Number(r.nominal_rencana) || 0
+                          );
+
+                          return (
+                            <div
+                              key={r.id}
+                              className="flex flex-wrap items-center justify-between gap-2"
+                            >
+                              <span className="text-[10px] text-slate-600">
+                                • Rencana {r.bulan_pencairan} —{' '}
+                                {formatRupiah(r.nominal_rencana)} —{' '}
+                                <span className="text-rose-600 font-semibold">
+                                  belum dicairkan
+                                </span>
+                              </span>
+
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenRealisasi(r)}
+                                  className="text-[10px] px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded transition cursor-pointer"
+                                  title="Tandai realisasi sekarang"
+                                >
+                                  💰 Cairkan
+                                </button>
+
+                                {suggestion && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleReschedule(r, suggestion.bulan)}
+                                    className="text-[10px] px-2 py-0.5 bg-white hover:bg-orange-100 text-orange-700 border border-orange-300 rounded transition cursor-pointer"
+                                    title={`Sisa efektif ${suggestion.bulan}: ${formatRupiah(
+                                      suggestion.sisaLimit
+                                    )}`}
+                                  >
+                                    💡 Pindah ke {suggestion.bulan}
+                                    {suggestion.diLuarPeriode && (
+                                      <span className="ml-1 text-orange-400">
+                                        (di luar periode)
+                                      </span>
+                                    )}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+
+                  {risikoTumpukanGroups.length > RISIKO_PREVIEW_COUNT && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllRisiko((v) => !v)}
+                      className="text-[10px] text-orange-700 font-semibold hover:underline cursor-pointer"
+                    >
+                      {showAllRisiko
+                        ? '▲ Tampilkan lebih sedikit'
+                        : `+ ${risikoTumpukanGroups.length - RISIKO_PREVIEW_COUNT} mitra lainnya`}
+                    </button>
+                  )}
                 </div>
-              );
-            })()}
+              </div>
+            )}
 
             {/* ================= NOTIFIKASI BELUM REALISASI / KURANG ================= */}
 
@@ -2167,8 +2310,7 @@ export default function PencairanPage() {
               </div>
             )}
 
-            {/* ================= NOTIFIKASI LIMIT (MENDEKATI/TERCAPAI/TERLAMPAUI/TERLAMBAT) ================= */}
-            {/* Diringkas jadi satu box, gaya sama seperti box "belum direalisasikan" di atas. */}
+            {/* ================= NOTIFIKASI LIMIT ================= */}
 
             {masalahGroups.length > 0 && (
               <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
@@ -2285,7 +2427,7 @@ export default function PencairanPage() {
               </div>
             </div>
 
-            {/* ================= TABEL (GROUPED PER MITRA) ================= */}
+            {/* ================= TABEL ================= */}
 
             <div className="mb-2 text-[11px] text-slate-500 px-1">
               {loading
@@ -2401,7 +2543,14 @@ export default function PencairanPage() {
 
                                     <td className="py-2.5 px-3.5">
                                       <div>{row.bulan_pencairan}</div>
-                                      <div className="text-[10px] text-slate-400">Keterangan: {row.catatan || 'Belum ada keterangan'}</div>
+                                      {status === 'terlambat' && (
+                                        <div className="text-[10px] text-orange-600 font-semibold">
+                                          ⚠️ Mencadangkan limit {bulanBerjalan}
+                                        </div>
+                                      )}
+                                      <div className="text-[10px] text-slate-400">
+                                        Keterangan: {row.catatan || 'Belum ada keterangan'}
+                                      </div>
                                     </td>
 
                                     <td className="py-2.5 px-3.5 text-right font-semibold text-blue-600">
@@ -2415,7 +2564,13 @@ export default function PencairanPage() {
                                         : '-'}
                                     </td>
 
-                                    <td className={`py-2.5 px-3.5 text-right font-semibold ${getSisaRencana(row) > 0 ? 'text-amber-600' : 'text-slate-400'}`}>
+                                    <td
+                                      className={`py-2.5 px-3.5 text-right font-semibold ${
+                                        getSisaRencana(row) > 0
+                                          ? 'text-amber-600'
+                                          : 'text-slate-400'
+                                      }`}
+                                    >
                                       {formatRupiah(getSisaRencana(row))}
                                     </td>
 
@@ -2469,7 +2624,17 @@ export default function PencairanPage() {
                                           className="p-1.5 text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-md transition cursor-pointer"
                                           title="Hapus"
                                         >
-                                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                          <svg
+                                            xmlns="http://www.w3.org/2000/svg"
+                                            width="14"
+                                            height="14"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
                                             <path d="M3 6h18" />
                                             <path d="M8 6V4h8v2" />
                                             <path d="M19 6l-1 14H6L5 6" />
@@ -2499,8 +2664,8 @@ export default function PencairanPage() {
 
       {isFormOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden border border-slate-200">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[92vh] overflow-y-auto border border-slate-200">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center sticky top-0 z-10">
               <h3 className="font-bold text-slate-800 text-sm">
                 {isEditMode ? 'Edit Rencana Pencairan' : 'Tambah Rencana Pencairan'}
               </h3>
@@ -2514,7 +2679,7 @@ export default function PencairanPage() {
             </div>
 
             <form onSubmit={handleSaveForm} className="p-5 space-y-4">
-              {/* PENUGASAN — combobox dengan pencarian nama mitra / kegiatan / SOBAT ID */}
+              {/* PENUGASAN */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Penugasan
@@ -2531,17 +2696,10 @@ export default function PencairanPage() {
                     }}
                     onFocus={() => {
                       if (isEditMode) return;
-                      // Kosongkan dulu teks yang sedang tampil (nama
-                      // penugasan terpilih) supaya daftar yang terbuka
-                      // menampilkan SEMUA penugasan seperti dropdown
-                      // biasa, bukan hasil yang sudah tersaring jadi
-                      // cuma 1 opsi karena "menyaring" dirinya sendiri.
                       setPenugasanSearchQuery('');
                       setIsPenugasanDropdownOpen(true);
                     }}
                     onBlur={() => {
-                      // Delay supaya klik pada opsi combobox / tombol panah
-                      // sempat terdaftar sebelum dropdown ditutup.
                       setTimeout(() => handleClosePenugasanDropdown(), 150);
                     }}
                     disabled={isEditMode}
@@ -2551,9 +2709,6 @@ export default function PencairanPage() {
                     required
                   />
 
-                  {/* Tombol panah dropdown — supaya tetap terasa seperti
-                      dropdown biasa yang bisa diklik untuk membuka semua
-                      opsi, bukan cuma kotak pencarian. */}
                   <button
                     type="button"
                     tabIndex={-1}
@@ -2567,7 +2722,11 @@ export default function PencairanPage() {
                     className="absolute inset-y-0 right-0 flex items-center pr-2.5 text-slate-400 disabled:opacity-30 cursor-pointer"
                     aria-label="Buka daftar penugasan"
                   >
-                    <span className={`text-[10px] transition-transform ${isPenugasanDropdownOpen ? 'rotate-180' : ''}`}>
+                    <span
+                      className={`text-[10px] transition-transform ${
+                        isPenugasanDropdownOpen ? 'rotate-180' : ''
+                      }`}
+                    >
                       ▼
                     </span>
                   </button>
@@ -2591,9 +2750,7 @@ export default function PencairanPage() {
                               formData.penugasan_id === p.id ? 'bg-blue-50' : ''
                             }`}
                           >
-                            <div className="font-semibold text-slate-800">
-                              {p.nama_mitra}
-                            </div>
+                            <div className="font-semibold text-slate-800">{p.nama_mitra}</div>
                             <div className="text-[10px] text-slate-400">
                               {p.nama_kegiatan} ·{' '}
                               <span className="font-mono text-blue-600">{p.sobat_id}</span>
@@ -2613,15 +2770,34 @@ export default function PencairanPage() {
                 )}
               </div>
 
+              {/* ⭐ PERINGATAN RENCANA TERLAMBAT MITRA INI */}
+              {rowsTerlambatForForm.length > 0 && (
+                <div className="rounded-md border-2 border-orange-300 bg-orange-50 px-3 py-2.5">
+                  <p className="text-[11px] font-bold text-orange-800">
+                    ⚠️ Mitra ini punya pencairan terlambat yang belum dicairkan
+                  </p>
+
+                  <div className="mt-1 space-y-0.5">
+                    {rowsTerlambatForForm.map((r) => (
+                      <p key={r.id} className="text-[10px] text-orange-700">
+                        • {r.bulan_pencairan} — {formatRupiah(r.nominal_rencana)}
+                      </p>
+                    ))}
+                  </div>
+
+                  <p className="text-[10px] text-orange-700 mt-1.5 leading-relaxed">
+                    Nominal di atas sudah <strong>dicadangkan</strong> dari limit{' '}
+                    <strong>{bulanBerjalan}</strong>, karena realisasinya paling cepat baru
+                    bisa dilakukan bulan ini. Rencana baru di {bulanBerjalan} hanya bisa
+                    disimpan jika <strong>sisa efektif</strong> di bawah masih mencukupi.
+                    Tindak lanjut yang benar: cairkan dulu rencana terlambat itu, atau
+                    pindahkan ke bulan lain.
+                  </p>
+                </div>
+              )}
+
               {isMultiMonthMode && selectedPenugasanForForm ? (
-                /* =========================================================
-                   RENCANA BERTAHAP (MULTI-BULAN)
-                   Muncul kalau periode kegiatan penugasan > 1 bulan, baik
-                   saat TAMBAH maupun EDIT. Admin isi/ubah nominal per
-                   bulan; bulan yang dikosongkan (0) tidak akan dibuatkan/
-                   disimpan rencananya. Bulan yang sudah direalisasikan
-                   dikunci karena tidak boleh diubah dari form ini.
-                ========================================================= */
+                /* ============ RENCANA BERTAHAP (MULTI-BULAN) ============ */
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Rencana Pencairan per Bulan (Bertahap)
@@ -2629,10 +2805,9 @@ export default function PencairanPage() {
                   <p className="text-[10px] text-slate-500 mb-2">
                     Periode kegiatan ini berlangsung{' '}
                     {selectedPenugasanForForm.periodeOptions!.length} bulan (
-                    {selectedPenugasanForForm.bulanKegiatanRaw}). Isi nominal untuk
-                    bulan yang direncanakan ada pencairan; biarkan kosong (0) untuk
-                    bulan yang dilewati. Nomor tahap mengikuti urutan bulan secara
-                    otomatis.
+                    {selectedPenugasanForForm.bulanKegiatanRaw}). Isi nominal untuk bulan
+                    yang direncanakan ada pencairan; biarkan kosong (0) untuk bulan yang
+                    dilewati. Nomor tahap mengikuti urutan bulan secara otomatis.
                   </p>
 
                   <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
@@ -2646,23 +2821,20 @@ export default function PencairanPage() {
                         existingRow?.nominal_dicairkan !== undefined;
 
                       const limitObj = getLimitForBulan(bulan);
-                      const usage = getMonthlyUsage(
+                      const usage = getProjectedUsage(
                         selectedPenugasanForForm.sobat_id,
                         bulan,
                         existingRowId
                       );
                       const hasLimit = Boolean(limitObj);
                       const sisa = hasLimit
-                        ? Number(limitObj?.batas_maksimal || 0) - usage.total
+                        ? Number(limitObj?.batas_maksimal || 0) - usage.proyeksiTotal
                         : 0;
                       const amount = multiMonthAmounts[bulan] || 0;
                       const overLimit = hasLimit && amount > sisa;
 
                       return (
-                        <div
-                          key={bulan}
-                          className="border border-slate-200 rounded-md p-2.5"
-                        >
+                        <div key={bulan} className="border border-slate-200 rounded-md p-2.5">
                           <div className="flex justify-between items-center mb-1">
                             <span className="text-[11px] font-semibold text-slate-700">
                               Tahap {idx + 1} — {bulan}
@@ -2672,9 +2844,16 @@ export default function PencairanPage() {
                                 ? 'sudah direalisasikan'
                                 : !hasLimit
                                 ? 'limit belum diatur'
-                                : `sisa ${formatRupiah(Math.max(sisa, 0))}`}
+                                : `sisa efektif ${formatRupiah(Math.max(sisa, 0))}`}
                             </span>
                           </div>
+
+                          {usage.cadanganTerlambat > 0 && !sudahRealisasi && (
+                            <p className="text-[10px] text-orange-700 mb-1">
+                              ⚠️ Sudah dipotong {formatRupiah(usage.cadanganTerlambat)} untuk
+                              rencana terlambat yang belum dicairkan.
+                            </p>
+                          )}
 
                           <div className="relative">
                             <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs text-slate-400 pointer-events-none">
@@ -2703,15 +2882,16 @@ export default function PencairanPage() {
 
                           {sudahRealisasi && (
                             <p className="text-[10px] text-slate-500 mt-1">
-                              Rencana bulan ini sudah direalisasikan, tidak dapat
-                              diubah dari sini. Gunakan menu Realisasi jika perlu
-                              penyesuaian.
+                              Rencana bulan ini sudah direalisasikan, tidak dapat diubah dari
+                              sini. Gunakan menu Realisasi jika perlu penyesuaian.
                             </p>
                           )}
                           {overLimit && !sudahRealisasi && (
                             <p className="text-[10px] text-rose-600 mt-1">
-                              Melebihi sisa limit bulan ini (
+                              Melebihi sisa efektif bulan ini (
                               {formatRupiah(Math.max(sisa, 0))}).
+                              {usage.cadanganTerlambat > 0 &&
+                                ' Cairkan atau pindahkan dulu rencana terlambat mitra ini.'}
                             </p>
                           )}
                           {!hasLimit && amount > 0 && !sudahRealisasi && (
@@ -2725,8 +2905,7 @@ export default function PencairanPage() {
                   </div>
 
                   <p className="text-[10px] text-slate-500 mt-2">
-                    Total rencana:{' '}
-                    <strong>{formatRupiah(totalMultiMonthAmount)}</strong>
+                    Total rencana: <strong>{formatRupiah(totalMultiMonthAmount)}</strong>
                   </p>
                 </div>
               ) : (
@@ -2766,22 +2945,24 @@ export default function PencairanPage() {
                           );
 
                           const limitObj = getLimitForBulan(b);
-                          const usage = getMonthlyUsage(
+                          const usage = getProjectedUsage(
                             selectedPenugasanForForm.sobat_id,
                             b,
                             currentRowId
                           );
                           const hasLimit = Boolean(limitObj);
                           const sisa = hasLimit
-                            ? Number(limitObj?.batas_maksimal || 0) - usage.total
+                            ? Number(limitObj?.batas_maksimal || 0) - usage.proyeksiTotal
                             : 0;
                           const isFull = hasLimit && sisa <= 0;
 
-                          // Bulan yang sudah punya rencana untuk penugasan ini
-                          // dikunci, supaya tidak bisa dibuatkan rencana kedua
-                          // yang duplikat pada bulan yang sama.
                           const isLockedByExisting =
-                            Boolean(existing) && b !== formData.bulan_pencairan;
+                            Boolean(existing) && !bulanEquals(b, formData.bulan_pencairan || '');
+
+                          const keteranganPenuh =
+                            usage.cadanganTerlambat > 0
+                              ? ' — penuh (terpakai rencana terlambat)'
+                              : ' — limit penuh';
 
                           return (
                             <option
@@ -2789,7 +2970,7 @@ export default function PencairanPage() {
                               value={b}
                               disabled={
                                 isLockedByExisting ||
-                                (isFull && b !== formData.bulan_pencairan)
+                                (isFull && !bulanEquals(b, formData.bulan_pencairan || ''))
                               }
                             >
                               {b}
@@ -2798,7 +2979,7 @@ export default function PencairanPage() {
                                 : !hasLimit
                                 ? ' — limit belum diatur'
                                 : isFull
-                                ? ' — limit penuh'
+                                ? keteranganPenuh
                                 : ` — sisa ${formatRupiah(sisa)}`}
                             </option>
                           );
@@ -2876,6 +3057,13 @@ export default function PencairanPage() {
                           <strong>{formatRupiah(sisaLimitUntukForm.digunakan || 0)}</strong>
                         </p>
 
+                        {(sisaLimitUntukForm.cadangan || 0) > 0 && (
+                          <p className="text-orange-700 font-semibold">
+                            Dicadangkan untuk rencana terlambat:{' '}
+                            <strong>{formatRupiah(sisaLimitUntukForm.cadangan || 0)}</strong>
+                          </p>
+                        )}
+
                         <p
                           className={
                             sisaLimitUntukForm.sisa < 0
@@ -2883,18 +3071,26 @@ export default function PencairanPage() {
                               : 'text-slate-500'
                           }
                         >
-                          Sisa limit:{' '}
+                          Sisa efektif:{' '}
                           <strong>
                             {formatRupiah(Math.max(sisaLimitUntukForm.sisa, 0))}
                           </strong>{' '}
                           dari {formatRupiah(sisaLimitUntukForm.limit)}
                         </p>
+
+                        {Number(formData.nominal_rencana) > sisaLimitUntukForm.sisa &&
+                          (sisaLimitUntukForm.cadangan || 0) > 0 && (
+                            <p className="text-rose-600 font-semibold leading-relaxed">
+                              🔴 Tidak bisa disimpan: kapasitas bulan ini sudah dipesan oleh
+                              rencana terlambat yang belum dicairkan. Cairkan atau pindahkan
+                              dulu rencana tersebut.
+                            </p>
+                          )}
                       </div>
                     )}
                   </div>
 
-                  {/* TAHAP KE — bisa diisi manual per baris, mis. untuk menandai
-                      rencana ini sebagai tahap keberapa dari mitra yang sama */}
+                  {/* TAHAP KE */}
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
                       Tahap Ke (opsional)
@@ -2916,9 +3112,9 @@ export default function PencairanPage() {
                     />
 
                     <p className="text-[10px] text-slate-500 mt-1">
-                      Menandai rencana ini sebagai tahap keberapa untuk mitra ini
-                      (opsional). Untuk rencana bertahap multi-bulan, nomor tahap
-                      biasanya sudah otomatis mengikuti urutan bulan.
+                      Menandai rencana ini sebagai tahap keberapa untuk mitra ini (opsional).
+                      Untuk rencana bertahap multi-bulan, nomor tahap biasanya sudah otomatis
+                      mengikuti urutan bulan.
                     </p>
                   </div>
                 </>
@@ -2938,13 +3134,17 @@ export default function PencairanPage() {
                   type="submit"
                   disabled={
                     isSubmitting ||
-                    (!isEditMode && !isMultiMonthMode && hasExistingRencanaForSelectedPenugasan)
+                    (!isEditMode &&
+                      !isMultiMonthMode &&
+                      hasExistingRencanaForSelectedPenugasan)
                   }
                   className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-md transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting
                     ? 'Menyimpan...'
-                    : !isEditMode && !isMultiMonthMode && hasExistingRencanaForSelectedPenugasan
+                    : !isEditMode &&
+                      !isMultiMonthMode &&
+                      hasExistingRencanaForSelectedPenugasan
                     ? 'Sudah Ada Rencana'
                     : 'Simpan'}
                 </button>
@@ -2958,15 +3158,17 @@ export default function PencairanPage() {
 
       {realisasiTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden border border-slate-200">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[92vh] overflow-y-auto border border-slate-200">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center sticky top-0 z-10">
               <div>
                 <h3 className="font-bold text-slate-800 text-sm">
                   Tandai Realisasi Pencairan
                 </h3>
 
                 <p className="text-[10px] text-slate-500 mt-0.5">
-                  Bulan limit mengikuti bulan dari tanggal realisasi. Jika terlambat, rencana tetap tercatat pada bulan awal tetapi pemakaian aktual masuk ke bulan realisasi.
+                  Bulan limit mengikuti bulan dari tanggal realisasi. Jika terlambat, rencana
+                  tetap tercatat pada bulan awal tetapi pemakaian aktual masuk ke bulan
+                  realisasi.
                 </p>
               </div>
 
@@ -3007,6 +3209,17 @@ export default function PencairanPage() {
                   <strong>{formatRupiah(realisasiTarget.nominal_rencana)}</strong>
                 </div>
               </div>
+
+              {getRowStatus(realisasiTarget) === 'terlambat' && (
+                <div className="rounded-md border border-orange-300 bg-orange-50 px-3 py-2">
+                  <p className="text-[10px] text-orange-800 leading-relaxed">
+                    ⚠️ Rencana ini terlambat. Begitu realisasinya disimpan, cadangan limit{' '}
+                    {bulanBerjalan} untuk mitra ini otomatis dilepas dan digantikan beban
+                    realisasi yang sebenarnya — sehingga rencana/penugasan baru di bulan ini
+                    bisa kembali dibuat selama masih ada sisa.
+                  </p>
+                </div>
+              )}
 
               {/* NOMINAL REALISASI */}
               <div>
@@ -3069,8 +3282,7 @@ export default function PencairanPage() {
                             Realisasi ini: <strong>{formatRupiah(nominal)}</strong>
                           </p>
                           <p>
-                            Total:{' '}
-                            <strong>{formatRupiah(usage.total + nominal)}</strong>
+                            Total: <strong>{formatRupiah(usage.total + nominal)}</strong>
                           </p>
                           <p>
                             Limit: <strong>{formatRupiah(usage.limit)}</strong>
@@ -3092,6 +3304,14 @@ export default function PencairanPage() {
                         {' dari '}
                         {formatRupiah(usage.limit)}
                       </p>
+
+                      {usage.cadanganTerlambat > 0 && (
+                        <p className="text-[10px] text-orange-700 mt-1">
+                          Catatan: mitra ini masih punya rencana terlambat lain sebesar{' '}
+                          {formatRupiah(usage.cadanganTerlambat)} yang juga akan membebani
+                          bulan {bulanBerjalan}.
+                        </p>
+                      )}
                     </div>
                   );
                 })()}
@@ -3113,23 +3333,31 @@ export default function PencairanPage() {
                   required
                 />
 
-                {realisasiTarget && realisasiForm.tanggal && (() => {
-                  const bulanRealisasi = monthInputToLabel(realisasiForm.tanggal.slice(0, 7));
-                  if (!bulanRealisasi || bulanRealisasi === realisasiTarget.bulan_pencairan) return null;
+                {realisasiTarget &&
+                  realisasiForm.tanggal &&
+                  (() => {
+                    const bulanRealisasi = monthInputToLabel(
+                      realisasiForm.tanggal.slice(0, 7)
+                    );
+                    if (
+                      !bulanRealisasi ||
+                      bulanEquals(bulanRealisasi, realisasiTarget.bulan_pencairan)
+                    )
+                      return null;
 
-                  return (
-                    <div className="mt-2 p-2.5 rounded-md bg-amber-50 border border-amber-200">
-                      <p className="text-[10px] text-amber-700 font-semibold">
-                        ⏰ Realisasi melewati bulan rencana
-                      </p>
-                      <p className="text-[10px] text-amber-600 mt-0.5">
-                        Rencana: <strong>{realisasiTarget.bulan_pencairan}</strong> →
-                        Realisasi: <strong>{bulanRealisasi}</strong>. Limit yang dipakai adalah
-                        limit {bulanRealisasi}.
-                      </p>
-                    </div>
-                  );
-                })()}
+                    return (
+                      <div className="mt-2 p-2.5 rounded-md bg-amber-50 border border-amber-200">
+                        <p className="text-[10px] text-amber-700 font-semibold">
+                          ⏰ Realisasi melewati bulan rencana
+                        </p>
+                        <p className="text-[10px] text-amber-600 mt-0.5">
+                          Rencana: <strong>{realisasiTarget.bulan_pencairan}</strong> →
+                          Realisasi: <strong>{bulanRealisasi}</strong>. Limit yang dipakai
+                          adalah limit {bulanRealisasi}.
+                        </p>
+                      </div>
+                    );
+                  })()}
               </div>
 
               {/* METODE */}
@@ -3203,16 +3431,16 @@ export default function PencairanPage() {
 
       {detailGroup && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[92vh] overflow-y-auto border border-slate-200">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center sticky top-0 z-10">
               <div>
                 <h3 className="font-bold text-slate-800 text-sm">
                   Detail Limit — {detailGroup.bulan}
                 </h3>
 
                 <p className="text-[10px] text-slate-500">
-                  Beban limit dihitung berdasarkan realisasi aktual dan rencana yang
-                  belum direalisasikan.
+                  Beban limit dihitung berdasarkan realisasi aktual dan rencana yang belum
+                  direalisasikan.
                 </p>
               </div>
 
@@ -3229,11 +3457,13 @@ export default function PencairanPage() {
                 const rowsInGroup = rows.filter(
                   (r) =>
                     r.sobat_id === detailGroup.sobatId &&
-                    getRowUsageMonth(r) === detailGroup.bulan
+                    bulanEquals(getRowUsageMonth(r), detailGroup.bulan)
                 );
 
                 const limitObj = getLimitForBulan(detailGroup.bulan);
-                const usage = getMonthlyUsage(detailGroup.sobatId, detailGroup.bulan);
+                const usage = getProjectedUsage(detailGroup.sobatId, detailGroup.bulan);
+
+                const rowsTerlambatLain = getRowsTerlambat(detailGroup.sobatId);
 
                 const totalRencana = rowsInGroup.reduce(
                   (sum, r) => sum + (Number(r.nominal_rencana) || 0),
@@ -3281,11 +3511,6 @@ export default function PencairanPage() {
                               )
                             : null;
 
-                          // Bulan realisasi aktual (dari tgl_pencairan), dipakai
-                          // untuk menjelaskan KENAPA baris ini masuk hitungan
-                          // bulan `detailGroup.bulan` — terutama kalau berbeda
-                          // dari bulan_pencairan (rencana awal), supaya admin
-                          // bisa langsung lihat sumber selisihnya di sini.
                           const bulanRealisasiAktual =
                             !belumRealisasi && r.tgl_pencairan
                               ? monthInputToLabel(r.tgl_pencairan.slice(0, 7))
@@ -3371,6 +3596,44 @@ export default function PencairanPage() {
                       </tbody>
                     </table>
 
+                    {/* CADANGAN RENCANA TERLAMBAT */}
+                    {usage.cadanganTerlambat > 0 && (
+                      <div className="rounded-md border border-orange-300 bg-orange-50 px-3 py-2.5">
+                        <p className="text-[11px] font-bold text-orange-800">
+                          ⚠️ Kapasitas {detailGroup.bulan} sudah dicadangkan{' '}
+                          {formatRupiah(usage.cadanganTerlambat)}
+                        </p>
+                        <div className="mt-1 space-y-0.5">
+                          {rowsTerlambatLain.map((r) => (
+                            <div
+                              key={r.id}
+                              className="flex flex-wrap items-center justify-between gap-2"
+                            >
+                              <span className="text-[10px] text-orange-700">
+                                • Rencana {r.bulan_pencairan} —{' '}
+                                {formatRupiah(r.nominal_rencana)} — belum dicairkan
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDetailGroup(null);
+                                  handleOpenRealisasi(r);
+                                }}
+                                className="text-[10px] px-2 py-0.5 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 rounded transition cursor-pointer shrink-0"
+                              >
+                                💰 Cairkan
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-orange-700 mt-1.5 leading-relaxed">
+                          Rencana di atas akan membebani limit bulan ini begitu
+                          direalisasikan. Selama belum dicairkan atau dipindahkan, kapasitas
+                          tersebut tidak bisa dipakai rencana baru.
+                        </p>
+                      </div>
+                    )}
+
                     {/* SUMMARY */}
                     <div className="text-xs bg-slate-50 rounded-lg p-3 space-y-1.5">
                       <div className="flex justify-between">
@@ -3397,6 +3660,15 @@ export default function PencairanPage() {
                         <span className="font-semibold">{formatRupiah(usage.total)}</span>
                       </div>
 
+                      {usage.cadanganTerlambat > 0 && (
+                        <div className="flex justify-between text-orange-700">
+                          <span>Cadangan Rencana Terlambat</span>
+                          <span className="font-semibold">
+                            {formatRupiah(usage.cadanganTerlambat)}
+                          </span>
+                        </div>
+                      )}
+
                       <div className="flex justify-between">
                         <span className="text-slate-500">Limit Bulan Ini</span>
                         <span className="font-semibold">
@@ -3405,7 +3677,7 @@ export default function PencairanPage() {
                       </div>
 
                       <div className="border-t border-slate-200 pt-1.5 flex justify-between">
-                        <span className="text-slate-500">Sisa Limit</span>
+                        <span className="text-slate-500">Sisa Limit (beban aktual)</span>
                         <span
                           className={`font-bold ${
                             usage.remaining < 0 ? 'text-rose-600' : 'text-emerald-600'
@@ -3417,6 +3689,23 @@ export default function PencairanPage() {
                         </span>
                       </div>
 
+                      {usage.cadanganTerlambat > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">
+                            Sisa Efektif (bisa dipakai rencana baru)
+                          </span>
+                          <span
+                            className={`font-bold ${
+                              usage.sisaEfektif < 0 ? 'text-rose-600' : 'text-emerald-600'
+                            }`}
+                          >
+                            {usage.sisaEfektif < 0
+                              ? `-${formatRupiah(Math.abs(usage.sisaEfektif))}`
+                              : formatRupiah(usage.sisaEfektif)}
+                          </span>
+                        </div>
+                      )}
+
                       {kelebihan > 0 && (
                         <div className="flex justify-between text-rose-600">
                           <span>Kelebihan</span>
@@ -3427,16 +3716,15 @@ export default function PencairanPage() {
 
                     <div className="text-[10px] text-slate-400">
                       <p>
-                        💡 Rencana yang sudah direalisasikan tidak dapat dijadwalkan
-                        ulang. Yang dapat dipindahkan adalah rencana yang belum
-                        direalisasikan.
+                        💡 Rencana yang sudah direalisasikan tidak dapat dijadwalkan ulang.
+                        Yang dapat dipindahkan adalah rencana yang belum direalisasikan.
                       </p>
 
                       <p className="mt-1">
-                        Sistem mengutamakan bulan berikutnya dalam periode kegiatan yang
-                        masih memiliki kapasitas. Jika tidak ada, sistem menyarankan
-                        bulan lain di luar periode kegiatan (ditandai "di luar periode")
-                        yang masih memiliki sisa limit. Keputusan reschedule tetap di admin.
+                        Sistem mengutamakan bulan berikutnya dalam periode kegiatan yang masih
+                        memiliki kapasitas. Jika tidak ada, sistem menyarankan bulan lain di
+                        luar periode kegiatan (ditandai "di luar periode") yang masih memiliki
+                        sisa limit. Keputusan reschedule tetap di admin.
                       </p>
                     </div>
                   </>
