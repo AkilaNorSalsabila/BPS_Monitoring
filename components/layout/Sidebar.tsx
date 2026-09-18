@@ -10,7 +10,15 @@ interface SidebarProps {
   onClose: () => void;
 }
 
-type UserRole = 'admin' | 'pegawai' | 'staff' | null;
+// ============================================
+// ROLE
+// ============================================
+
+type UserRole = 'admin' | 'pegawai' | null;
+
+// ============================================
+// ICON
+// ============================================
 
 type IconName =
   | 'dashboard'
@@ -24,13 +32,13 @@ type IconName =
   | 'settings'
   | 'history';
 
-/**
- * ============================================
- * SUPABASE CLIENT
- * ============================================
- */
+// ============================================
+// SUPABASE CLIENT
+// ============================================
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL;
+
 const supabasePublishableKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
 
@@ -39,13 +47,15 @@ const supabase = createClient(
   supabasePublishableKey!
 );
 
-/**
- * ============================================
- * KOMPONEN ICON
- * ============================================
- */
+// ============================================
+// KOMPONEN ICON
+// ============================================
 
-function Icon({ name }: { name: IconName }) {
+function Icon({
+  name,
+}: {
+  name: IconName;
+}) {
   const common = {
     width: 16,
     height: 16,
@@ -62,10 +72,34 @@ function Icon({ name }: { name: IconName }) {
     case 'dashboard':
       return (
         <svg {...common}>
-          <rect x="3" y="3" width="7" height="7" rx="1" />
-          <rect x="14" y="3" width="7" height="7" rx="1" />
-          <rect x="3" y="14" width="7" height="7" rx="1" />
-          <rect x="14" y="14" width="7" height="7" rx="1" />
+          <rect
+            x="3"
+            y="3"
+            width="7"
+            height="7"
+            rx="1"
+          />
+          <rect
+            x="14"
+            y="3"
+            width="7"
+            height="7"
+            rx="1"
+          />
+          <rect
+            x="3"
+            y="14"
+            width="7"
+            height="7"
+            rx="1"
+          />
+          <rect
+            x="14"
+            y="14"
+            width="7"
+            height="7"
+            rx="1"
+          />
         </svg>
       );
 
@@ -73,7 +107,11 @@ function Icon({ name }: { name: IconName }) {
       return (
         <svg {...common}>
           <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-          <circle cx="9" cy="7" r="4" />
+          <circle
+            cx="9"
+            cy="7"
+            r="4"
+          />
           <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
         </svg>
       );
@@ -88,7 +126,13 @@ function Icon({ name }: { name: IconName }) {
     case 'clipboard':
       return (
         <svg {...common}>
-          <rect x="5" y="4" width="14" height="17" rx="2" />
+          <rect
+            x="5"
+            y="4"
+            width="14"
+            height="17"
+            rx="2"
+          />
           <path d="M9 4V2h6v2M9 9h6M9 13h6M9 17h3" />
         </svg>
       );
@@ -96,7 +140,13 @@ function Icon({ name }: { name: IconName }) {
     case 'monitor':
       return (
         <svg {...common}>
-          <rect x="3" y="4" width="18" height="13" rx="2" />
+          <rect
+            x="3"
+            y="4"
+            width="18"
+            height="13"
+            rx="2"
+          />
           <path d="M8 21h8M12 17v4" />
           <path d="m8 11 2.5 2L16 8" />
         </svg>
@@ -113,7 +163,13 @@ function Icon({ name }: { name: IconName }) {
     case 'table':
       return (
         <svg {...common}>
-          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <rect
+            x="3"
+            y="4"
+            width="18"
+            height="16"
+            rx="2"
+          />
           <path d="M3 9h18" />
           <path d="M9 9v11" />
           <path d="M15 9v11" />
@@ -144,20 +200,22 @@ function Icon({ name }: { name: IconName }) {
       return (
         <svg {...common}>
           <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+
           <path
             d="m19.4 15 .1.1a2 2 0 0 1-2.8 2.8l-.1-.1a2 2 0 0 0-3.4 1.4v.2a2 2 0 0 1-4 0v-.2a2 2 0 0 0-3.4-1.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A2 2 0 0 0 1.7 12a2 2 0 0 0 1.3-1.9 2 2 0 0 1 4 0A2 2 0 0 0 10.4 8.7l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1A2 2 0 0 0 16.6 4.5V4a2 2 0 0 1 4 0v.2a2 2 0 0 0 1.4 3.4h.2a2 2 0 0 1 0 4H22a2 2 0 0 0-1.4 3.4Z"
             transform="scale(.78) translate(3.4 3.4)"
           />
         </svg>
       );
+
+    default:
+      return null;
   }
 }
 
-/**
- * ============================================
- * MENU DASHBOARD
- * ============================================
- */
+// ============================================
+// MENU DASHBOARD
+// ============================================
 
 const dashboardAdminItem = {
   label: 'Dashboard',
@@ -171,12 +229,10 @@ const dashboardStaffItem = {
   icon: 'dashboard' as IconName,
 };
 
-/**
- * ============================================
- * MENU DATA MASTER
- * HANYA ADMIN
- * ============================================
- */
+// ============================================
+// MENU DATA MASTER
+// ADMIN & PEGAWAI
+// ============================================
 
 const dataMasterItems = [
   {
@@ -191,12 +247,10 @@ const dataMasterItems = [
   },
 ];
 
-/**
- * ============================================
- * MENU PENUGASAN
- * HANYA ADMIN
- * ============================================
- */
+// ============================================
+// MENU PENUGASAN
+// ADMIN & PEGAWAI
+// ============================================
 
 const assignmentItems = [
   {
@@ -221,12 +275,10 @@ const assignmentItems = [
   },
 ];
 
-/**
- * ============================================
- * MENU LAPORAN
- * ADMIN & PEGAWAI
- * ============================================
- */
+// ============================================
+// MENU LAPORAN
+// ADMIN & PEGAWAI
+// ============================================
 
 const reportItems = [
   {
@@ -241,11 +293,10 @@ const reportItems = [
   },
 ];
 
-/**
- * ============================================
- * MENU SISTEM
- * ============================================
- */
+// ============================================
+// MENU SISTEM
+// ADMIN & PEGAWAI
+// ============================================
 
 const systemItems = [
   {
@@ -255,18 +306,10 @@ const systemItems = [
   },
 ];
 
-/**
- * ============================================
- * MENU PENGATURAN
- * ADMIN & PEGAWAI
- * ============================================
- *
- * Pengaturan dapat diakses oleh:
- * - Admin
- * - Pegawai
- *
- * Manajemen Akun tetap hanya Admin.
- */
+// ============================================
+// MENU PENGATURAN
+// ADMIN & PEGAWAI
+// ============================================
 
 const settingsItem = {
   label: 'Pengaturan',
@@ -274,17 +317,19 @@ const settingsItem = {
   icon: 'settings' as IconName,
 };
 
+// ============================================
+// MENU KHUSUS ADMIN
+// ============================================
+
 const accountManagementItem = {
   label: 'Manajemen Akun',
   href: '/pengaturan-akun',
   icon: 'users' as IconName,
 };
 
-/**
- * ============================================
- * SIDEBAR
- * ============================================
- */
+// ============================================
+// SIDEBAR
+// ============================================
 
 export default function Sidebar({
   mobileOpen,
@@ -298,11 +343,9 @@ export default function Sidebar({
   const [loadingRole, setLoadingRole] =
     useState(true);
 
-  /**
-   * ============================================
-   * AMBIL ROLE USER YANG SEDANG LOGIN
-   * ============================================
-   */
+  // ==========================================
+  // AMBIL ROLE USER
+  // ==========================================
 
   useEffect(() => {
     let mounted = true;
@@ -311,10 +354,15 @@ export default function Sidebar({
       try {
         setLoadingRole(true);
 
+        // ====================================
+        // USER AUTH
+        // ====================================
+
         const {
           data: { user },
           error: userError,
-        } = await supabase.auth.getUser();
+        } =
+          await supabase.auth.getUser();
 
         if (userError || !user) {
           if (mounted) {
@@ -324,16 +372,24 @@ export default function Sidebar({
           return;
         }
 
+        // ====================================
+        // PROFILE
+        // ====================================
+
         const {
           data: profile,
           error: profileError,
-        } = await supabase
-          .from('profiles')
-          .select('role, status')
-          .eq('id', user.id)
-          .single();
+        } =
+          await supabase
+            .from('profiles')
+            .select('role, status')
+            .eq('id', user.id)
+            .single();
 
-        if (profileError || !profile) {
+        if (
+          profileError ||
+          !profile
+        ) {
           console.error(
             'Sidebar Profile Error:',
             profileError
@@ -345,6 +401,10 @@ export default function Sidebar({
 
           return;
         }
+
+        // ====================================
+        // NORMALISASI
+        // ====================================
 
         const role = String(
           profile.role ?? ''
@@ -358,12 +418,13 @@ export default function Sidebar({
           .trim()
           .toLowerCase();
 
-        /**
-         * Hanya akun approved
-         * yang dianggap mempunyai akses.
-         */
+        // ====================================
+        // HANYA AKUN APPROVED
+        // ====================================
 
-        if (status !== 'approved') {
+        if (
+          status !== 'approved'
+        ) {
           if (mounted) {
             setUserRole(null);
           }
@@ -371,13 +432,22 @@ export default function Sidebar({
           return;
         }
 
+        // ====================================
+        // ROLE VALID
+        //
+        // HANYA:
+        // admin
+        // pegawai
+        // ====================================
+
         if (
           role === 'admin' ||
-          role === 'pegawai' ||
-          role === 'staff'
+          role === 'pegawai'
         ) {
           if (mounted) {
-            setUserRole(role as UserRole);
+            setUserRole(
+              role as UserRole
+            );
           }
         } else {
           if (mounted) {
@@ -402,17 +472,18 @@ export default function Sidebar({
 
     getUserRole();
 
-    /**
-     * Update role/session jika status auth berubah.
-     */
+    // ========================================
+    // AUTH STATE LISTENER
+    // ========================================
 
     const {
       data: authListener,
-    } = supabase.auth.onAuthStateChange(
-      () => {
-        getUserRole();
-      }
-    );
+    } =
+      supabase.auth.onAuthStateChange(
+        () => {
+          getUserRole();
+        }
+      );
 
     return () => {
       mounted = false;
@@ -420,11 +491,9 @@ export default function Sidebar({
     };
   }, []);
 
-  /**
-   * ============================================
-   * RENDER MENU ITEM
-   * ============================================
-   */
+  // ==========================================
+  // RENDER MENU ITEM
+  // ==========================================
 
   const renderMenuItem = (item: {
     label: string;
@@ -433,7 +502,9 @@ export default function Sidebar({
   }) => {
     const active =
       pathname === item.href ||
-      pathname.startsWith(`${item.href}/`);
+      pathname.startsWith(
+        `${item.href}/`
+      );
 
     return (
       <Link
@@ -447,20 +518,24 @@ export default function Sidebar({
         }`}
       >
         <Icon name={item.icon} />
-        <span>{item.label}</span>
+
+        <span>
+          {item.label}
+        </span>
       </Link>
     );
   };
 
-  /**
-   * ============================================
-   * SIDEBAR
-   * ============================================
-   */
+  // ==========================================
+  // SIDEBAR
+  // ==========================================
 
   return (
     <>
-      {/* Overlay mobile */}
+      {/* ======================================
+          OVERLAY MOBILE
+      ======================================= */}
+
       {mobileOpen && (
         <button
           type="button"
@@ -470,7 +545,10 @@ export default function Sidebar({
         />
       )}
 
-      {/* Sidebar utama */}
+      {/* ======================================
+          SIDEBAR UTAMA
+      ======================================= */}
+
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-[230px] flex-col border-r border-blue-400/60 bg-[#07508f] text-white shadow-xl transition-transform duration-200 lg:translate-x-0 ${
           mobileOpen
@@ -478,7 +556,10 @@ export default function Sidebar({
             : '-translate-x-full'
         }`}
       >
-        {/* LOGO BPS */}
+        {/* ====================================
+            LOGO BPS
+        ===================================== */}
+
         <div className="flex h-[62px] items-center justify-center border-b border-white/15 px-4">
           <Link
             href={
@@ -497,11 +578,14 @@ export default function Sidebar({
           </Link>
         </div>
 
-        {/* NAVIGASI */}
+        {/* ====================================
+            NAVIGASI
+        ===================================== */}
+
         <nav className="flex-1 overflow-y-auto px-2.5 py-3 text-[14px]">
 
           {/* ==================================
-              LOADING ROLE
+              LOADING
           ================================== */}
 
           {loadingRole ? (
@@ -510,6 +594,10 @@ export default function Sidebar({
             </div>
 
           ) : userRole === 'admin' ? (
+
+            // ==================================
+            // ADMIN
+            // ==================================
 
             <>
               {/* ==================================
@@ -591,7 +679,7 @@ export default function Sidebar({
               </div>
 
               {/* ==================================
-                  PENGATURAN ADMIN
+                  PENGATURAN
               ================================== */}
 
               <div>
@@ -615,6 +703,10 @@ export default function Sidebar({
 
           ) : userRole === 'pegawai' ? (
 
+            // ==================================
+            // PEGAWAI
+            // ==================================
+
             <>
               {/* ==================================
                   DASHBOARD PEGAWAI
@@ -627,7 +719,41 @@ export default function Sidebar({
               </div>
 
               {/* ==================================
-                  LAPORAN PEGAWAI
+                  DATA MASTER
+              ================================== */}
+
+              <div className="mb-3">
+                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+                  Data Master
+                </div>
+
+                <div className="space-y-0.5">
+                  {dataMasterItems.map(
+                    (item) =>
+                      renderMenuItem(item)
+                  )}
+                </div>
+              </div>
+
+              {/* ==================================
+                  PENUGASAN
+              ================================== */}
+
+              <div className="mb-3">
+                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+                  Penugasan
+                </div>
+
+                <div className="space-y-0.5">
+                  {assignmentItems.map(
+                    (item) =>
+                      renderMenuItem(item)
+                  )}
+                </div>
+              </div>
+
+              {/* ==================================
+                  LAPORAN
               ================================== */}
 
               <div className="mb-3">
@@ -644,7 +770,24 @@ export default function Sidebar({
               </div>
 
               {/* ==================================
-                  PENGATURAN PEGAWAI
+                  SISTEM
+              ================================== */}
+
+              <div className="mb-3">
+                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
+                  Sistem
+                </div>
+
+                <div className="space-y-0.5">
+                  {systemItems.map(
+                    (item) =>
+                      renderMenuItem(item)
+                  )}
+                </div>
+              </div>
+
+              {/* ==================================
+                  PENGATURAN
               ================================== */}
 
               <div>
@@ -653,8 +796,6 @@ export default function Sidebar({
                 </div>
 
                 <div className="space-y-0.5">
-                  {/* Pegawai hanya dapat
-                      mengakses Pengaturan */}
                   {renderMenuItem(
                     settingsItem
                   )}
@@ -662,44 +803,16 @@ export default function Sidebar({
               </div>
             </>
 
-          ) : userRole === 'staff' ? (
-
-            <>
-              {/* ==================================
-                  DASHBOARD STAFF
-              ================================== */}
-
-              <div className="mb-3">
-                {renderMenuItem(
-                  dashboardStaffItem
-                )}
-              </div>
-
-              {/* ==================================
-                  LAPORAN STAFF
-              ================================== */}
-
-              <div>
-                <div className="mb-1 px-2 text-[12px] font-medium text-white/80">
-                  Laporan
-                </div>
-
-                <div className="space-y-0.5">
-                  {reportItems.map(
-                    (item) =>
-                      renderMenuItem(item)
-                  )}
-                </div>
-              </div>
-            </>
-
           ) : (
+
+            // ==================================
+            // TIDAK ADA AKSES
+            // ==================================
 
             <div className="px-2 py-2 text-xs text-white/70">
               Tidak ada menu yang tersedia.
             </div>
           )}
-
         </nav>
       </aside>
     </>

@@ -6,6 +6,7 @@ import React, {
   useCallback,
   useMemo,
   useRef,
+  Suspense,
 } from 'react';
 
 import { createClient } from '@supabase/supabase-js';
@@ -430,10 +431,12 @@ const STATUS_META: Record<
 };
 
 // =========================================================
-// PAGE
+// PAGE (KONTEN) — dipisah dari default export supaya useSearchParams()
+// bisa dibungkus <Suspense> di bawah, sesuai syarat Next.js App Router
+// untuk halaman yang di-prerender/statis.
 // =========================================================
 
-export default function PencairanPage() {
+function PencairanPageContent() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const searchParams = useSearchParams();
@@ -3735,5 +3738,26 @@ export default function PencairanPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// =========================================================
+// DEFAULT EXPORT — membungkus konten dengan <Suspense> karena
+// PencairanPageContent memakai useSearchParams(). Tanpa ini, build
+// Next.js akan gagal dengan error:
+// "useSearchParams() should be wrapped in a suspense boundary".
+// =========================================================
+
+export default function PencairanPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center text-xs text-slate-400">
+          Memuat halaman pencairan...
+        </div>
+      }
+    >
+      <PencairanPageContent />
+    </Suspense>
   );
 }

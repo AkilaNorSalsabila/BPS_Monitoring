@@ -15,6 +15,7 @@ interface KegiatanDetail {
   nama_kegiatan: string;
   bulan_kegiatan?: string;
   pagu_anggaran?: number;
+  tim_id?: number | null;
 }
 
 interface MitraPenugasan {

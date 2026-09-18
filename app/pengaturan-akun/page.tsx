@@ -1,3 +1,4 @@
+
 'use client';
 
 import React, {
@@ -39,12 +40,18 @@ interface Profile {
   phone: string | null;
   role: string;
   jabatan: string | null;
+  tim_id: number | null;
   avatar_url: string | null;
   status: string;
   approved_by: string | null;
   approved_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface Tim {
+  id: number;
+  nama_tim: string;
 }
 
 type StatusFilter =
@@ -146,6 +153,33 @@ function StatusBadge({
 }
 
 // =========================================================
+// ROLE BADGE
+// =========================================================
+
+function RoleBadge({
+  role,
+}: {
+  role: string;
+}) {
+  const normalized =
+    role.toLowerCase().trim();
+
+  if (normalized === 'admin') {
+    return (
+      <span className="inline-flex items-center rounded-md border border-purple-200 bg-purple-50 px-2.5 py-1 text-[11px] font-semibold text-purple-700">
+        Admin
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700">
+      Pegawai
+    </span>
+  );
+}
+
+// =========================================================
 // PAGE
 // =========================================================
 
@@ -195,6 +229,12 @@ export default function PengaturanAkunPage() {
 
   const [editJabatan, setEditJabatan] =
     useState('');
+
+  const [editTimId, setEditTimId] =
+    useState('');
+
+  const [timList, setTimList] =
+    useState<Tim[]>([]);
 
   // =======================================================
   // CEK ADMIN
@@ -250,6 +290,32 @@ export default function PengaturanAkunPage() {
   );
 
   // =======================================================
+  // FETCH TIM
+  // =======================================================
+
+  const fetchTim = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('tim')
+        .select('id, nama_tim')
+        .order('id', { ascending: true });
+
+      if (error) {
+        throw error;
+      }
+
+      setTimList(data ?? []);
+    } catch (error) {
+      console.error(
+        'Error fetching tim:',
+        error
+      );
+
+      setTimList([]);
+    }
+  }, []);
+
+  // =======================================================
   // FETCH PROFILES
   // =======================================================
 
@@ -279,20 +345,21 @@ export default function PengaturanAkunPage() {
           .from('profiles')
           .select(
             `
-            id,
-            nip,
-            full_name,
-            email,
-            phone,
-            role,
-            jabatan,
-            avatar_url,
-            status,
-            approved_by,
-            approved_at,
-            created_at,
-            updated_at
-          `
+              id,
+              nip,
+              full_name,
+              email,
+              phone,
+              role,
+              jabatan,
+              tim_id,
+              avatar_url,
+              status,
+              approved_by,
+              approved_at,
+              created_at,
+              updated_at
+            `
           )
           .order(
             'created_at',
@@ -331,8 +398,9 @@ export default function PengaturanAkunPage() {
   // =======================================================
 
   useEffect(() => {
+    fetchTim();
     fetchProfiles();
-  }, [fetchProfiles]);
+  }, [fetchTim, fetchProfiles]);
 
   // =======================================================
   // STATISTIK
@@ -379,27 +447,41 @@ export default function PengaturanAkunPage() {
         (profile) => {
           const matchStatus =
             statusFilter === 'semua' ||
-            profile.status === statusFilter;
+            profile.status ===
+              statusFilter;
+
+          const namaTim =
+            timList.find(
+              (tim) =>
+                tim.id === profile.tim_id
+            )?.nama_tim || '';
 
           const matchSearch =
             !keyword ||
             (
-              profile.full_name || ''
+              profile.full_name ||
+              ''
             )
               .toLowerCase()
               .includes(keyword) ||
             (
-              profile.nip || ''
+              profile.nip ||
+              ''
             )
               .toLowerCase()
               .includes(keyword) ||
             (
-              profile.email || ''
+              profile.email ||
+              ''
             )
               .toLowerCase()
               .includes(keyword) ||
+            namaTim
+              .toLowerCase()
+              .includes(keyword) ||
             (
-              profile.jabatan || ''
+              profile.jabatan ||
+              ''
             )
               .toLowerCase()
               .includes(keyword);
@@ -414,187 +496,222 @@ export default function PengaturanAkunPage() {
       profiles,
       searchKeyword,
       statusFilter,
+      timList,
     ]);
+
+  // =======================================================
+  // RESET FORM EDIT
+  // =======================================================
+
+  const resetEditForm = () => {
+    setEditingProfile(null);
+    setEditName('');
+    setEditNip('');
+    setEditEmail('');
+    setEditPhone('');
+    setEditJabatan('');
+    setEditTimId('');
+  };
 
   // =======================================================
   // APPROVE PEGAWAI
   // =======================================================
 
-  const handleApprove =
-    async (profile: Profile) => {
-      const nama =
-        profile.full_name ||
-        profile.email ||
-        'pegawai ini';
+  const handleApprove = async (
+    profile: Profile
+  ) => {
+    const nama =
+      profile.full_name ||
+      profile.email ||
+      'pegawai ini';
 
-      const confirmed =
-        window.confirm(
-          `Apakah Anda yakin ingin menyetujui akun ${nama}?`
+    if (!profile.tim_id) {
+      alert(
+        'Tim pegawai belum ditentukan. Silakan Edit akun terlebih dahulu dan tentukan tim.'
+      );
+
+      handleEdit(profile);
+      return;
+    }
+
+    const selectedTim =
+      timList.find(
+        (tim) => tim.id === profile.tim_id
+      );
+
+    if (!selectedTim) {
+      alert(
+        'Tim pegawai tidak ditemukan. Silakan Edit akun dan pilih tim yang valid.'
+      );
+
+      handleEdit(profile);
+      return;
+    }
+
+    const confirmed =
+      window.confirm(
+        `Apakah Anda yakin ingin menyetujui akun ${nama}?\n\n` +
+        `Tim yang akan digunakan: ${selectedTim.nama_tim}`
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setProcessingId(profile.id);
+
+    try {
+      const {
+        isAdmin,
+        userId,
+      } = await checkAdmin();
+
+      if (!isAdmin || !userId) {
+        throw new Error(
+          'Anda tidak memiliki hak sebagai admin.'
         );
-
-      if (!confirmed) {
-        return;
       }
 
-      setProcessingId(profile.id);
+      const now =
+        new Date().toISOString();
 
-      try {
-        const {
-          isAdmin,
-          userId,
-        } = await checkAdmin();
+      const {
+        data,
+        error,
+      } = await supabase
+        .from('profiles')
+        .update({
+          status: 'approved',
+          approved_by: userId,
+          approved_at: now,
+          updated_at: now,
+        })
+        .eq('id', profile.id)
+        .in('status', [
+          'pending',
+          'rejected',
+        ])
+        .select()
+        .single();
 
-        if (
-          !isAdmin ||
-          !userId
-        ) {
-          throw new Error(
-            'Anda tidak memiliki hak sebagai admin.'
-          );
-        }
-
-        const now =
-          new Date().toISOString();
-
-        const {
-          data,
-          error,
-        } = await supabase
-          .from('profiles')
-          .update({
-            status: 'approved',
-            approved_by: userId,
-            approved_at: now,
-            updated_at: now,
-          })
-          .eq(
-            'id',
-            profile.id
-          )
-          .in(
-            'status',
-            ['pending', 'rejected']
-          )
-          .select()
-          .single();
-
-        if (error) {
-          throw error;
-        }
-
-        if (!data) {
-          throw new Error(
-            'Data pegawai tidak berhasil diperbarui.'
-          );
-        }
-
-        alert(
-          `Akun ${nama} berhasil disetujui.`
-        );
-
-        await fetchProfiles();
-      } catch (error) {
-        console.error(
-          'Error approving profile:',
-          error
-        );
-
-        alert(
-          error instanceof Error
-            ? error.message
-            : 'Gagal menyetujui akun pegawai.'
-        );
-      } finally {
-        setProcessingId(null);
+      if (error) {
+        throw error;
       }
-    };
+
+      if (!data) {
+        throw new Error(
+          'Data pegawai tidak berhasil diperbarui.'
+        );
+      }
+
+      alert(
+        `Akun ${nama} berhasil disetujui.\nTim: ${selectedTim.nama_tim}`
+      );
+
+      await fetchProfiles();
+    } catch (error) {
+      console.error(
+        'Error approving profile:',
+        error
+      );
+
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Gagal menyetujui akun pegawai.'
+      );
+    } finally {
+      setProcessingId(null);
+    }
+  };
 
   // =======================================================
   // REJECT PEGAWAI
   // =======================================================
 
-  const handleReject =
-    async (profile: Profile) => {
-      const nama =
-        profile.full_name ||
-        profile.email ||
-        'pegawai ini';
+  const handleReject = async (
+    profile: Profile
+  ) => {
+    const nama =
+      profile.full_name ||
+      profile.email ||
+      'pegawai ini';
 
-      const confirmed =
-        window.confirm(
-          `Apakah Anda yakin ingin menolak pendaftaran ${nama}?`
+    const confirmed =
+      window.confirm(
+        `Apakah Anda yakin ingin menolak pendaftaran ${nama}?`
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setProcessingId(profile.id);
+
+    try {
+      const {
+        isAdmin,
+      } = await checkAdmin();
+
+      if (!isAdmin) {
+        throw new Error(
+          'Anda tidak memiliki hak sebagai admin.'
         );
-
-      if (!confirmed) {
-        return;
       }
 
-      setProcessingId(profile.id);
+      const {
+        data,
+        error,
+      } = await supabase
+        .from('profiles')
+        .update({
+          status: 'rejected',
+          approved_by: null,
+          approved_at: null,
+          updated_at:
+            new Date().toISOString(),
+        })
+        .eq(
+          'id',
+          profile.id
+        )
+        .eq(
+          'status',
+          'pending'
+        )
+        .select()
+        .single();
 
-      try {
-        const {
-          isAdmin,
-        } = await checkAdmin();
-
-        if (!isAdmin) {
-          throw new Error(
-            'Anda tidak memiliki hak sebagai admin.'
-          );
-        }
-
-        const {
-          data,
-          error,
-        } = await supabase
-          .from('profiles')
-          .update({
-            status: 'rejected',
-            approved_by: null,
-            approved_at: null,
-            updated_at:
-              new Date().toISOString(),
-          })
-          .eq(
-            'id',
-            profile.id
-          )
-          .eq(
-            'status',
-            'pending'
-          )
-          .select()
-          .single();
-
-        if (error) {
-          throw error;
-        }
-
-        if (!data) {
-          throw new Error(
-            'Data pegawai tidak berhasil diperbarui.'
-          );
-        }
-
-        alert(
-          `Pendaftaran ${nama} ditolak.`
-        );
-
-        await fetchProfiles();
-      } catch (error) {
-        console.error(
-          'Error rejecting profile:',
-          error
-        );
-
-        alert(
-          error instanceof Error
-            ? error.message
-            : 'Gagal menolak akun pegawai.'
-        );
-      } finally {
-        setProcessingId(null);
+      if (error) {
+        throw error;
       }
-    };
+
+      if (!data) {
+        throw new Error(
+          'Data pegawai tidak berhasil diperbarui.'
+        );
+      }
+
+      alert(
+        `Pendaftaran ${nama} ditolak.`
+      );
+
+      await fetchProfiles();
+    } catch (error) {
+      console.error(
+        'Error rejecting profile:',
+        error
+      );
+
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Gagal menolak akun pegawai.'
+      );
+    } finally {
+      setProcessingId(null);
+    }
+  };
 
   // =======================================================
   // BUKA MODAL EDIT
@@ -624,6 +741,12 @@ export default function PengaturanAkunPage() {
     setEditJabatan(
       profile.jabatan || ''
     );
+
+    setEditTimId(
+      profile.tim_id
+        ? String(profile.tim_id)
+        : ''
+    );
   };
 
   // =======================================================
@@ -637,13 +760,7 @@ export default function PengaturanAkunPage() {
       return;
     }
 
-    setEditingProfile(null);
-
-    setEditName('');
-    setEditNip('');
-    setEditEmail('');
-    setEditPhone('');
-    setEditJabatan('');
+    resetEditForm();
   };
 
   // =======================================================
@@ -660,7 +777,26 @@ export default function PengaturanAkunPage() {
         alert(
           'Nama pegawai tidak boleh kosong.'
         );
+        return;
+      }
 
+      if (!editTimId) {
+        alert(
+          'Tim pegawai wajib ditentukan.'
+        );
+        return;
+      }
+
+      const selectedTim =
+        timList.find(
+          (tim) =>
+            tim.id === Number(editTimId)
+        );
+
+      if (!selectedTim) {
+        alert(
+          'Tim yang dipilih tidak valid.'
+        );
         return;
       }
 
@@ -669,9 +805,8 @@ export default function PengaturanAkunPage() {
       );
 
       try {
-        const {
-          isAdmin,
-        } = await checkAdmin();
+        const { isAdmin } =
+          await checkAdmin();
 
         if (!isAdmin) {
           throw new Error(
@@ -679,50 +814,49 @@ export default function PengaturanAkunPage() {
           );
         }
 
-        const {
-          error,
-        } = await supabase
-          .from('profiles')
-          .update({
-            full_name:
-              editName.trim(),
+        const { error } =
+          await supabase
+            .from('profiles')
+            .update({
+              full_name:
+                editName.trim(),
 
-            nip:
-              editNip.trim() || null,
+              nip:
+                editNip.trim() ||
+                null,
 
-            email:
-              editEmail.trim() || null,
+              email:
+                editEmail.trim() ||
+                null,
 
-            phone:
-              editPhone.trim() || null,
+              phone:
+                editPhone.trim() ||
+                null,
 
-            jabatan:
-              editJabatan.trim() || null,
+              jabatan:
+                editJabatan.trim() ||
+                null,
 
-            updated_at:
-              new Date().toISOString(),
-          })
-          .eq(
-            'id',
-            editingProfile.id
-          );
+              tim_id:
+                Number(editTimId),
+
+              updated_at:
+                new Date().toISOString(),
+            })
+            .eq(
+              'id',
+              editingProfile.id
+            );
 
         if (error) {
           throw error;
         }
 
         alert(
-          'Data akun berhasil diperbarui.'
+          `Data akun berhasil diperbarui.\nTim: ${selectedTim.nama_tim}`
         );
 
-        setEditingProfile(null);
-
-        setEditName('');
-        setEditNip('');
-        setEditEmail('');
-        setEditPhone('');
-        setEditJabatan('');
-
+        resetEditForm();
         await fetchProfiles();
       } catch (error) {
         console.error(
@@ -742,7 +876,6 @@ export default function PengaturanAkunPage() {
 
   // =======================================================
   // APPROVE DARI MODAL EDIT
-  // KHUSUS REJECTED
   // =======================================================
 
   const handleApproveFromEdit =
@@ -751,14 +884,42 @@ export default function PengaturanAkunPage() {
         return;
       }
 
+      if (!editName.trim()) {
+        alert(
+          'Nama pegawai tidak boleh kosong.'
+        );
+        return;
+      }
+
+      if (!editTimId) {
+        alert(
+          'Tim pegawai wajib ditentukan sebelum akun disetujui.'
+        );
+        return;
+      }
+
+      const selectedTim =
+        timList.find(
+          (tim) =>
+            tim.id === Number(editTimId)
+        );
+
+      if (!selectedTim) {
+        alert(
+          'Tim yang dipilih tidak valid.'
+        );
+        return;
+      }
+
       const nama =
-        editingProfile.full_name ||
+        editName.trim() ||
         editingProfile.email ||
         'pegawai ini';
 
       const confirmed =
         window.confirm(
-          `Apakah Anda yakin ingin menyetujui akun ${nama}?`
+          `Apakah Anda yakin ingin menyetujui akun ${nama}?\n\n` +
+          `Tim final: ${selectedTim.nama_tim}`
         );
 
       if (!confirmed) {
@@ -775,10 +936,7 @@ export default function PengaturanAkunPage() {
           userId,
         } = await checkAdmin();
 
-        if (
-          !isAdmin ||
-          !userId
-        ) {
+        if (!isAdmin || !userId) {
           throw new Error(
             'Anda tidak memiliki hak sebagai admin.'
           );
@@ -793,18 +951,46 @@ export default function PengaturanAkunPage() {
         } = await supabase
           .from('profiles')
           .update({
+            full_name:
+              editName.trim(),
+
+            nip:
+              editNip.trim() ||
+              null,
+
+            email:
+              editEmail.trim() ||
+              null,
+
+            phone:
+              editPhone.trim() ||
+              null,
+
+            jabatan:
+              editJabatan.trim() ||
+              null,
+
+            tim_id:
+              Number(editTimId),
+
             status: 'approved',
-            approved_by: userId,
-            approved_at: now,
-            updated_at: now,
+
+            approved_by:
+              userId,
+
+            approved_at:
+              now,
+
+            updated_at:
+              now,
           })
           .eq(
             'id',
             editingProfile.id
           )
-          .eq(
+          .in(
             'status',
-            'rejected'
+            ['pending', 'rejected']
           )
           .select()
           .single();
@@ -820,21 +1006,14 @@ export default function PengaturanAkunPage() {
         }
 
         alert(
-          `Akun ${nama} berhasil disetujui.`
+          `Akun ${nama} berhasil disetujui.\nTim: ${selectedTim.nama_tim}`
         );
 
-        setEditingProfile(null);
-
-        setEditName('');
-        setEditNip('');
-        setEditEmail('');
-        setEditPhone('');
-        setEditJabatan('');
-
+        resetEditForm();
         await fetchProfiles();
       } catch (error) {
         console.error(
-          'Error approving rejected profile:',
+          'Error approving profile:',
           error
         );
 
@@ -853,7 +1032,9 @@ export default function PengaturanAkunPage() {
   // =======================================================
 
   const handleDelete =
-    async (profile: Profile) => {
+    async (
+      profile: Profile
+    ) => {
       const nama =
         profile.full_name ||
         profile.email ||
@@ -1002,7 +1183,7 @@ export default function PengaturanAkunPage() {
               </h1>
 
               <p className="mt-1 text-xs text-slate-500">
-                Kelola akun pegawai dan
+                Kelola akun pegawai, tim, dan
                 persetujuan pendaftaran pengguna
                 sistem.
               </p>
@@ -1195,7 +1376,7 @@ export default function PengaturanAkunPage() {
                         e.target.value
                       )
                     }
-                    placeholder="Cari nama, NIP, email, atau jabatan"
+                    placeholder="Cari nama, NIP, email, atau tim"
                     className="w-full rounded-md border border-slate-200 py-1.5 pl-8 pr-3 text-xs outline-none transition focus:border-blue-400"
                   />
 
@@ -1315,17 +1496,13 @@ export default function PengaturanAkunPage() {
                         Pegawai
                       </th>
 
-                      {/* <th className="px-4 py-3">
-                        NIP
-                      </th> */}
-
                       <th className="px-4 py-3">
                         Email
                       </th>
 
-                      {/* <th className="px-4 py-3">
-                        Jabatan
-                      </th> */}
+                      <th className="px-4 py-3">
+                        Tim
+                      </th>
 
                       <th className="px-4 py-3 text-center">
                         Role
@@ -1351,17 +1528,21 @@ export default function PengaturanAkunPage() {
 
                     {loading ? (
                       <tr>
+
                         <td
-                          colSpan={9}
+                          colSpan={8}
                           className="py-10 text-center text-slate-400"
                         >
                           Memuat data akun...
                         </td>
+
                       </tr>
-                    ) : filteredProfiles.length === 0 ? (
+                    ) : filteredProfiles.length ===
+                      0 ? (
                       <tr>
+
                         <td
-                          colSpan={9}
+                          colSpan={8}
                           className="py-10 text-center text-slate-400"
                         >
 
@@ -1375,6 +1556,7 @@ export default function PengaturanAkunPage() {
                           </div>
 
                         </td>
+
                       </tr>
                     ) : (
                       filteredProfiles.map(
@@ -1386,6 +1568,9 @@ export default function PengaturanAkunPage() {
                           const isProcessing =
                             processingId ===
                             profile.id;
+
+                          const isCurrentUser =
+                            false;
 
                           return (
                             <tr
@@ -1420,13 +1605,6 @@ export default function PengaturanAkunPage() {
 
                               </td>
 
-                              {/* NIP */}
-
-                              {/* <td className="px-4 py-3.5 font-mono text-[11px] text-blue-600">
-                                {profile.nip ||
-                                  '-'}
-                              </td> */}
-
                               {/* EMAIL */}
 
                               <td className="px-4 py-3.5 text-slate-600">
@@ -1434,24 +1612,34 @@ export default function PengaturanAkunPage() {
                                   '-'}
                               </td>
 
-                              {/* JABATAN */}
+                              {/* TIM */}
 
-                              {/* <td className="px-4 py-3.5 text-slate-600">
-                                {profile.jabatan || '-'}
-                              </td> */}
+                              <td className="px-4 py-3.5">
+
+                                {profile.tim_id ? (
+                                  <span className="inline-flex max-w-[220px] rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700">
+                                    {timList.find(
+                                      (tim) =>
+                                        tim.id === profile.tim_id
+                                    )?.nama_tim ||
+                                      'Tim tidak ditemukan'}
+                                  </span>
+                                ) : (
+                                  <span className="text-[11px] italic text-amber-600">
+                                    Belum ditentukan
+                                  </span>
+                                )}
+
+                              </td>
 
                               {/* ROLE */}
 
                               <td className="px-4 py-3.5 text-center">
-                                {profile.role === 'admin' ? (
-                                  <span className="inline-flex items-center rounded-md border border-purple-200 bg-purple-50 px-2.5 py-1 text-[11px] font-semibold text-purple-700">
-                                    Admin
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700">
-                                    Pegawai
-                                  </span>
-                                )}
+                                <RoleBadge
+                                  role={
+                                    profile.role
+                                  }
+                                />
                               </td>
 
                               {/* TANGGAL */}
@@ -1494,6 +1682,21 @@ export default function PengaturanAkunPage() {
                                 'pending' ? (
 
                                   <div className="flex items-center justify-center gap-1.5">
+
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleEdit(
+                                          profile
+                                        )
+                                      }
+                                      disabled={
+                                        isProcessing
+                                      }
+                                      className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-[11px] font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      Edit
+                                    </button>
 
                                     <button
                                       type="button"
@@ -1562,7 +1765,8 @@ export default function PengaturanAkunPage() {
                                         )
                                       }
                                       disabled={
-                                        isProcessing
+                                        isProcessing ||
+                                        isCurrentUser
                                       }
                                       className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                                     >
@@ -1673,11 +1877,17 @@ export default function PengaturanAkunPage() {
               <div>
 
                 <h2 className="text-sm font-bold text-slate-800">
-                  Edit Akun Pegawai
+                  {editingProfile.status ===
+                  'pending'
+                    ? 'Verifikasi Akun Pegawai'
+                    : 'Edit Akun Pegawai'}
                 </h2>
 
                 <p className="mt-1 text-[11px] text-slate-500">
-                  Perbarui informasi akun pegawai.
+                  {editingProfile.status ===
+                  'pending'
+                    ? 'Periksa data dan tentukan tim final sebelum menyetujui akun.'
+                    : 'Perbarui informasi akun pegawai.'}
                 </p>
 
               </div>
@@ -1730,6 +1940,35 @@ export default function PengaturanAkunPage() {
 
               </div>
 
+              {/* INFO TIM PENGAJUAN */}
+
+              {editingProfile.status ===
+                'pending' && (
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+
+                  <p className="text-[11px] font-semibold text-amber-800">
+                    Tim yang Diajukan
+                  </p>
+
+                  <p className="mt-1 text-xs text-amber-700">
+                    {editingProfile.tim_id
+                      ? timList.find(
+                          (tim) =>
+                            tim.id === editingProfile.tim_id
+                        )?.nama_tim ||
+                        'Tim tidak ditemukan'
+                      : 'Belum ditentukan'}
+                  </p>
+
+                  <p className="mt-1 text-[10px] text-amber-600">
+                    Admin dapat mengoreksi tim sebelum akun disetujui.
+                  </p>
+
+                </div>
+
+              )}
+
               {/* NAMA */}
 
               <div>
@@ -1756,7 +1995,7 @@ export default function PengaturanAkunPage() {
 
               {/* NIP */}
 
-              {/* <div>
+              <div>
 
                 <label className="mb-1 block text-[11px] font-semibold text-slate-600">
                   NIP
@@ -1776,7 +2015,7 @@ export default function PengaturanAkunPage() {
                   className="w-full rounded-md border border-slate-200 px-3 py-2 text-xs outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
                 />
 
-              </div> */}
+              </div>
 
               {/* EMAIL */}
 
@@ -1801,8 +2040,7 @@ export default function PengaturanAkunPage() {
                 />
 
                 <p className="mt-1 text-[10px] text-slate-400">
-                  Email di sini memperbarui data
-                  profile.
+                  Email di sini memperbarui data profile.
                 </p>
 
               </div>
@@ -1831,29 +2069,82 @@ export default function PengaturanAkunPage() {
 
               </div>
 
-              {/* JABATAN */}
+              {/* TIM PEGAWAI */}
 
-              {/* <div>
+              <div>
+
+                <label className="mb-1 block text-[11px] font-semibold text-slate-600">
+                  Tim Pegawai
+                  <span className="ml-1 text-rose-500">
+                    *
+                  </span>
+                </label>
+
+                <select
+                  value={editTimId}
+                  onChange={(e) =>
+                    setEditTimId(
+                      e.target.value
+                    )
+                  }
+                  disabled={
+                    processingId ===
+                    editingProfile.id
+                  }
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50"
+                >
+                  <option value="">
+                    Pilih tim pegawai
+                  </option>
+
+                  {timList.map((tim) => (
+                    <option
+                      key={tim.id}
+                      value={tim.id}
+                    >
+                      {tim.nama_tim}
+                    </option>
+                  ))}
+                </select>
+
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Tim menentukan kelompok data yang dapat diakses oleh pegawai.
+                </p>
+
+              </div>
+
+              {/* JABATAN OPSIONAL */}
+
+              <div>
 
                 <label className="mb-1 block text-[11px] font-semibold text-slate-600">
                   Jabatan
+                  <span className="ml-1 text-[10px] font-normal text-slate-400">
+                    (Opsional)
+                  </span>
                 </label>
 
                 <input
                   type="text"
-                  value={
-                    editJabatan
-                  }
+                  value={editJabatan}
                   onChange={(e) =>
                     setEditJabatan(
                       e.target.value
                     )
                   }
-                  placeholder="Masukkan jabatan"
-                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-xs outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  placeholder="Masukkan jabatan jika diperlukan"
+                  disabled={
+                    processingId ===
+                    editingProfile.id
+                  }
+                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-xs outline-none transition focus:border-blue-400 focus:ring-1 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50"
                 />
 
-              </div> */}
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Jabatan hanya sebagai informasi profil dan bukan penentu akses data.
+                </p>
+
+              </div>
 
             </div>
 
@@ -1879,10 +2170,12 @@ export default function PengaturanAkunPage() {
 
               <div className="flex items-center gap-2">
 
-                {/* APPROVE KHUSUS REJECTED */}
+                {/* APPROVE */}
 
-                {editingProfile.status ===
-                  'rejected' && (
+                {(editingProfile.status ===
+                  'pending' ||
+                  editingProfile.status ===
+                    'rejected') && (
 
                   <button
                     type="button"
@@ -1898,7 +2191,7 @@ export default function PengaturanAkunPage() {
                     {processingId ===
                     editingProfile.id
                       ? 'Memproses...'
-                      : '✓ Setujui Akun'}
+                      : '✓ Simpan & Setujui'}
                   </button>
 
                 )}

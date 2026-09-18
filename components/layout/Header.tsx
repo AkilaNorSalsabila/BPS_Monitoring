@@ -12,7 +12,9 @@ import BellNotification from '@/components/notifications/BellNotification';
 // SUPABASE CLIENT
 // ============================================
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const supabaseUrl =
+  process.env.NEXT_PUBLIC_SUPABASE_URL!;
+
 const supabasePublishableKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!;
 
@@ -27,9 +29,10 @@ const supabase = createClient(
 
 interface HeaderProps {
   onMenuClick: () => void;
+  title?: string;
 }
 
-type UserRole = 'admin' | 'pegawai' | 'staff' | null;
+type UserRole = 'admin' | 'pegawai' | null;
 
 interface Profile {
   full_name: string | null;
@@ -42,14 +45,23 @@ interface Profile {
 // HEADER
 // ============================================
 
-export default function Header({ onMenuClick }: HeaderProps) {
+export default function Header({
+  onMenuClick,
+  title = 'Dashboard',
+}: HeaderProps) {
   const router = useRouter();
 
-  const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [user, setUser] =
+    useState<User | null>(null);
 
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [profile, setProfile] =
+    useState<Profile | null>(null);
+
+  const [dropdownOpen, setDropdownOpen] =
+    useState(false);
+
+  const dropdownRef =
+    useRef<HTMLDivElement>(null);
 
   // ============================================
   // AMBIL USER + PROFILE
@@ -63,7 +75,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
         const {
           data: { user },
           error: userError,
-        } = await supabase.auth.getUser();
+        } =
+          await supabase.auth.getUser();
 
         if (userError || !user) {
           if (mounted) {
@@ -78,8 +91,14 @@ export default function Header({ onMenuClick }: HeaderProps) {
           setUser(user);
         }
 
-        // Ambil data profile dari public.profiles
-        const { data: profileData, error: profileError } =
+        // ========================================
+        // PROFILE
+        // ========================================
+
+        const {
+          data: profileData,
+          error: profileError,
+        } =
           await supabase
             .from('profiles')
             .select(
@@ -125,43 +144,51 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (!mounted) return;
+    } =
+      supabase.auth.onAuthStateChange(
+        async (_event, session) => {
+          if (!mounted) return;
 
-        const currentUser = session?.user ?? null;
+          const currentUser =
+            session?.user ?? null;
 
-        setUser(currentUser);
+          setUser(currentUser);
 
-        if (!currentUser) {
-          setProfile(null);
-          return;
+          if (!currentUser) {
+            setProfile(null);
+            return;
+          }
+
+          const {
+            data: profileData,
+            error,
+          } =
+            await supabase
+              .from('profiles')
+              .select(
+                'full_name, email, role, avatar_url'
+              )
+              .eq(
+                'id',
+                currentUser.id
+              )
+              .single();
+
+          if (error) {
+            console.error(
+              'Header Profile Error:',
+              error
+            );
+
+            setProfile(null);
+            return;
+          }
+
+          if (mounted) {
+            setProfile(profileData);
+          }
         }
-
-        const { data: profileData, error } =
-          await supabase
-            .from('profiles')
-            .select(
-              'full_name, email, role, avatar_url'
-            )
-            .eq('id', currentUser.id)
-            .single();
-
-        if (error) {
-          console.error(
-            'Header Profile Error:',
-            error
-          );
-
-          setProfile(null);
-          return;
-        }
-
-        if (mounted) {
-          setProfile(profileData);
-        }
-      }
-    );
+      );
 
     return () => {
       mounted = false;
@@ -174,7 +201,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
   // ============================================
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (
+      e: MouseEvent
+    ) => {
       if (
         dropdownRef.current &&
         !dropdownRef.current.contains(
@@ -204,8 +233,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
   const normalizedRole: UserRole =
     profile?.role === 'admin' ||
-    profile?.role === 'pegawai' ||
-    profile?.role === 'staff'
+    profile?.role === 'pegawai'
       ? profile.role
       : null;
 
@@ -218,9 +246,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
       ? 'Admin'
       : normalizedRole === 'pegawai'
         ? 'Pegawai'
-        : normalizedRole === 'staff'
-          ? 'Staff'
-          : 'Pengguna';
+        : 'Pengguna';
 
   // ============================================
   // NAMA USER
@@ -257,7 +283,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
   const initials = displayName
     .trim()
     .split(/\s+/)
-    .map((w: string) => w[0])
+    .map(
+      (word: string) => word[0]
+    )
     .slice(0, 2)
     .join('')
     .toUpperCase();
@@ -283,13 +311,14 @@ export default function Header({ onMenuClick }: HeaderProps) {
   return (
     <header className="sticky top-0 z-20 flex h-[62px] items-center justify-between border-b border-slate-200 bg-white px-4 sm:px-5">
 
-      {/* ============================================
+      {/* ==========================================
           BAGIAN KIRI
-          ============================================ */}
+      =========================================== */}
 
       <div className="flex items-center gap-3">
 
         {/* Mobile menu */}
+
         <button
           type="button"
           onClick={onMenuClick}
@@ -310,6 +339,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
         </button>
 
         {/* Desktop sidebar toggle */}
+
         <button
           type="button"
           className="hidden rounded-md p-1 text-slate-500 hover:bg-slate-100 lg:block"
@@ -328,20 +358,22 @@ export default function Header({ onMenuClick }: HeaderProps) {
           </svg>
         </button>
 
+        {/* TITLE */}
+
         <span className="text-[16px] font-semibold text-slate-800">
-          Dashboard
+          {title}
         </span>
       </div>
 
-      {/* ============================================
+      {/* ==========================================
           BAGIAN KANAN
-          ============================================ */}
+      =========================================== */}
 
       <div className="flex items-center gap-2.5">
 
-        {/* ============================================
+        {/* ========================================
             PROFILE DROPDOWN
-            ============================================ */}
+        ========================================= */}
 
         <div
           className="relative flex items-center"
@@ -350,12 +382,15 @@ export default function Header({ onMenuClick }: HeaderProps) {
           <button
             type="button"
             onClick={() =>
-              setDropdownOpen((prev) => !prev)
+              setDropdownOpen(
+                (prev) => !prev
+              )
             }
             className="flex items-center gap-2.5 rounded-lg px-1.5 py-1 transition hover:bg-slate-50 focus:outline-none"
           >
 
             {/* Nama & Role */}
+
             <div className="hidden text-right sm:block">
 
               <div className="text-[10px] font-semibold text-slate-800">
@@ -369,6 +404,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
             </div>
 
             {/* Avatar */}
+
             <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-gradient-to-br from-amber-100 via-orange-100 to-slate-200 text-[10px] font-bold text-slate-600 shadow-sm">
 
               {avatarUrl ? (
@@ -384,20 +420,19 @@ export default function Header({ onMenuClick }: HeaderProps) {
             </div>
           </button>
 
-          {/* ============================================
+          {/* ========================================
               PROFILE DROPDOWN
-              ============================================ */}
+          ========================================= */}
 
           {dropdownOpen && (
             <div className="absolute right-0 top-[46px] z-50 w-60 rounded-xl border border-slate-200 bg-white py-2 shadow-lg">
 
-              {/* ============================================
-                  DETAIL PROFILE
-                  ============================================ */}
+              {/* DETAIL PROFILE */}
 
               <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3">
 
                 {/* Avatar */}
+
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-gradient-to-br from-amber-100 via-orange-100 to-slate-200 text-xs font-bold text-slate-600">
 
                   {avatarUrl ? (
@@ -413,6 +448,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
                 </div>
 
                 {/* Informasi */}
+
                 <div className="min-w-0">
 
                   <div className="truncate text-xs font-semibold text-slate-800">
@@ -424,6 +460,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
                   </div>
 
                   {/* ROLE */}
+
                   <div className="mt-0.5 inline-block rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-600">
                     {displayRole}
                   </div>
@@ -431,14 +468,16 @@ export default function Header({ onMenuClick }: HeaderProps) {
                 </div>
               </div>
 
-              {/* ============================================
+              {/* ====================================
                   PENGATURAN
-                  ============================================ */}
+              ===================================== */}
 
               <Link
                 href="/settings"
                 onClick={() =>
-                  setDropdownOpen(false)
+                  setDropdownOpen(
+                    false
+                  )
                 }
                 className="flex w-full items-center gap-2 px-4 py-2 text-left text-xs text-slate-700 transition hover:bg-slate-50"
               >
@@ -458,9 +497,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
                 Pengaturan
               </Link>
 
-              {/* ============================================
+              {/* ====================================
                   LOGOUT
-                  ============================================ */}
+              ===================================== */}
 
               <button
                 type="button"
@@ -486,9 +525,9 @@ export default function Header({ onMenuClick }: HeaderProps) {
           )}
         </div>
 
-        {/* ============================================
+        {/* ========================================
             BELL NOTIFICATION
-            ============================================ */}
+        ========================================= */}
 
         <BellNotification />
 

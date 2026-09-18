@@ -393,7 +393,7 @@ export default function LoginPage() {
           userRole === 'staff'
         ) {
           router.push(
-            '/dashboard/staff'
+            '/dashboard'
           );
 
           router.refresh();
